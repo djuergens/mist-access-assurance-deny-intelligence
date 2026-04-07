@@ -1,0 +1,1107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mist — Deny Log Intelligence</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --surface2: #22263a;
+    --border: #2e3350; --text: #e2e8f0; --text-muted: #8892a4;
+    --accent: #4f8ef7; --cert: #f97316; --cred: #a855f7; --mac: #06b6d4;
+    --high: #ef4444; --med: #f59e0b; --low: #22c55e;
+    --silent: #6366f1; --resolved: #22c55e; --failing: #ef4444;
+  }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; font-size: 14px; min-height: 100vh; }
+
+  /* ── Config Screen ── */
+  #config-screen { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; }
+  .config-box { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 40px 44px; width: 100%; max-width: 520px; }
+  .config-logo { font-size: 13px; color: var(--text-muted); letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 20px; }
+  .config-title { font-size: 24px; font-weight: 700; margin-bottom: 8px; }
+  .config-sub { color: var(--text-muted); font-size: 13px; margin-bottom: 32px; line-height: 1.6; }
+  .field { margin-bottom: 18px; }
+  .field label { display: block; font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+  .field input, .field select { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; color: var(--text); font-size: 14px; outline: none; transition: border-color 0.15s; }
+  .field input:focus, .field select:focus { border-color: var(--accent); }
+  .field input::placeholder { color: var(--text-muted); }
+  .field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .run-btn { width: 100%; padding: 12px; background: var(--accent); color: #fff; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; margin-top: 8px; transition: opacity 0.15s; }
+  .run-btn:hover { opacity: 0.88; }
+  .run-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .config-error { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); border-radius: 8px; padding: 12px 14px; font-size: 13px; color: #fca5a5; margin-top: 14px; display: none; line-height: 1.6; }
+  .config-note { font-size: 12px; color: var(--text-muted); margin-top: 20px; line-height: 1.6; padding-top: 20px; border-top: 1px solid var(--border); }
+  .cors-warning { background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.3); border-radius: 8px; padding: 12px 14px; font-size: 13px; color: #fcd34d; margin-bottom: 20px; display: none; line-height: 1.7; }
+  /* Token help accordion */
+  .help-toggle { font-size: 12px; color: var(--accent); cursor: pointer; margin-bottom: 6px; display: inline-block; }
+  .help-toggle:hover { text-decoration: underline; }
+  .help-steps { display: none; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 14px; font-size: 13px; line-height: 1.8; }
+  .help-steps ol { padding-left: 18px; }
+  .help-steps li { margin-bottom: 4px; }
+  .help-steps code { background: var(--bg); padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+  /* Help tab */
+  .help-section { margin-bottom: 28px; }
+  .help-section h3 { font-size: 15px; font-weight: 600; margin-bottom: 10px; color: var(--text); }
+  .help-section p, .help-section li { font-size: 13px; color: var(--text-muted); line-height: 1.8; }
+  .help-section ul, .help-section ol { padding-left: 20px; }
+  .help-section li { margin-bottom: 4px; }
+  .help-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  .help-table th { text-align: left; padding: 8px 12px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-size: 11px; text-transform: uppercase; }
+  .help-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; line-height: 1.6; }
+  .help-table td:first-child { font-weight: 600; white-space: nowrap; color: var(--text); }
+  .help-table td:last-child { color: var(--text-muted); }
+
+  /* ── Loading ── */
+  #loading-screen { display: none; align-items: center; justify-content: center; min-height: 100vh; flex-direction: column; gap: 20px; }
+  .spinner { width: 40px; height: 40px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .load-status { font-size: 14px; color: var(--text-muted); }
+  .load-progress { width: 280px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .load-bar { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s ease; width: 0%; }
+
+  /* ── Dashboard ── */
+  #dashboard { display: none; }
+  .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; }
+  .header-title { font-size: 18px; font-weight: 700; }
+  .header-meta { color: var(--text-muted); font-size: 12px; }
+  .header-right { display: flex; align-items: center; gap: 16px; font-size: 12px; color: var(--text-muted); }
+  .refresh-btn { padding: 5px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface2); color: var(--text); cursor: pointer; font-size: 12px; }
+  .refresh-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .main { padding: 24px; max-width: 1400px; margin: 0 auto; }
+
+  /* ── Cards ── */
+  .cards-row { display: grid; gap: 16px; margin-bottom: 24px; }
+  .cards-row.metric-cards { grid-template-columns: repeat(5, 1fr); }
+  .cards-row.category-cards { grid-template-columns: repeat(3, 1fr); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+  .card-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+  .card-value { font-size: 28px; font-weight: 700; line-height: 1; }
+  .card-sub { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
+  .card.clickable { cursor: pointer; transition: border-color 0.15s; }
+  .card.clickable:hover { border-color: var(--accent); }
+  .card.active-filter { border-color: var(--accent); background: rgba(79,142,247,0.08); }
+  .cat-icon { font-size: 22px; margin-bottom: 8px; }
+  .cat-count { font-size: 26px; font-weight: 700; }
+  .cat-label { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+  .cert-color { color: var(--cert); } .cred-color { color: var(--cred); } .mac-color { color: var(--mac); }
+
+  /* ── Section ── */
+  .section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 24px; }
+  .section-title { font-size: 14px; font-weight: 600; margin-bottom: 16px; }
+
+  /* ── Timeline ── */
+  .timeline-header { display: flex; gap: 0; margin-bottom: 6px; padding-left: 200px; }
+  .timeline-day-label { flex: 1; text-align: center; font-size: 11px; color: var(--text-muted); min-width: 40px; }
+  .timeline-row { display: flex; align-items: center; margin-bottom: 4px; }
+  .timeline-client-label { width: 200px; font-size: 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 12px; flex-shrink: 0; }
+  .timeline-cells { display: flex; gap: 3px; flex: 1; }
+  .timeline-cell { flex: 1; min-width: 40px; height: 20px; border-radius: 3px; background: var(--surface2); }
+  .timeline-cell.cert { background: var(--cert); }
+  .timeline-cell.cred { background: var(--cred); }
+  .timeline-cell.mac  { background: var(--mac); }
+
+  /* ── Deny reasons ── */
+  .reason-row { display: flex; align-items: flex-start; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .reason-row:last-child { border-bottom: none; }
+  .reason-row:hover { background: var(--surface2); margin: 0 -20px; padding: 12px 20px; border-radius: 6px; }
+  .reason-row.active-reason { background: rgba(79,142,247,0.08); margin: 0 -20px; padding: 12px 20px; border-radius: 6px; border-left: 3px solid var(--accent); }
+  .reason-bar-wrap { width: 130px; flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
+  .reason-bar { height: 8px; border-radius: 4px; min-width: 4px; }
+  .reason-client-count { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
+  .reason-text { font-size: 13px; flex: 1; line-height: 1.5; }
+  .reason-macs { font-size: 11px; color: var(--text-muted); margin-top: 3px; font-family: monospace; }
+
+  /* ── Alerts ── */
+  .alert-card { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.3); border-radius: 8px; padding: 14px 16px; margin-bottom: 12px; }
+  .alert-card.silent { background: rgba(99,102,241,0.08); border-color: rgba(99,102,241,0.3); }
+  .alert-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+  .alert-body { font-size: 12px; color: var(--text-muted); }
+
+  /* ── Table ── */
+  .table-wrapper { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 10px 12px; border-bottom: 2px solid var(--border); color: var(--text-muted); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer; white-space: nowrap; user-select: none; }
+  th:hover { color: var(--text); }
+  td { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:hover td { background: var(--surface2); }
+  .mac-cell { font-family: monospace; font-size: 12px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .badge-cert     { background: rgba(249,115,22,0.15);  color: var(--cert); }
+  .badge-cred     { background: rgba(168,85,247,0.15);  color: var(--cred); }
+  .badge-mac      { background: rgba(6,182,212,0.15);   color: var(--mac);  }
+  .badge-high     { background: rgba(239,68,68,0.15);   color: var(--high); }
+  .badge-med      { background: rgba(245,158,11,0.15);  color: var(--med);  }
+  .badge-low      { background: rgba(34,197,94,0.15);   color: var(--low);  }
+  .badge-failing  { background: rgba(239,68,68,0.15);   color: var(--high); }
+  .badge-silent   { background: rgba(99,102,241,0.15);  color: var(--silent); }
+  .badge-resolved { background: rgba(34,197,94,0.15);   color: var(--resolved); }
+
+  /* ── Tabs ── */
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+  .tab { padding: 8px 16px; cursor: pointer; border-radius: 6px 6px 0 0; font-size: 13px; color: var(--text-muted); border: 1px solid transparent; border-bottom: none; }
+  .tab.active { background: var(--surface); border-color: var(--border); color: var(--text); margin-bottom: -1px; }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* ── Filter bar ── */
+  .filter-bar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .filter-bar input  { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; color: var(--text); font-size: 13px; width: 240px; outline: none; }
+  .filter-bar input:focus { border-color: var(--accent); }
+  .filter-bar select { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; color: var(--text); font-size: 13px; outline: none; }
+  .clear-btn { font-size: 12px; color: var(--text-muted); cursor: pointer; }
+  .clear-btn:hover { color: var(--text); }
+  .result-count { font-size: 12px; color: var(--text-muted); margin-left: auto; }
+
+  /* ── Email composer ── */
+  .site-selector { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+  .site-btn { padding: 6px 14px; border: 1px solid var(--border); border-radius: 20px; cursor: pointer; background: var(--surface2); color: var(--text); font-size: 12px; }
+  .site-btn.active { border-color: var(--accent); color: var(--accent); }
+  .email-box { background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+  .email-field { margin-bottom: 12px; }
+  .email-field label { display: block; font-size: 11px; color: var(--text-muted); margin-bottom: 4px; text-transform: uppercase; }
+  .email-field input, .email-field textarea { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; color: var(--text); font-size: 13px; font-family: inherit; outline: none; }
+  .email-field textarea { min-height: 300px; resize: vertical; line-height: 1.6; }
+  .btn-row { display: flex; gap: 8px; margin-top: 12px; }
+  .btn { padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn:hover { opacity: 0.85; }
+
+  @media (max-width: 1000px) { .cards-row.metric-cards { grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width: 700px)  { .cards-row.metric-cards { grid-template-columns: repeat(2, 1fr); } .cards-row.category-cards { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════
+     CONFIG SCREEN
+═══════════════════════════════════════════ -->
+<div id="config-screen">
+  <div class="config-box">
+    <div class="config-logo">Mist Access Assurance</div>
+    <div class="config-title">Deny Log Intelligence</div>
+    <div class="config-sub">Connect your Mist org to surface client-centric RADIUS deny analytics — one record per client, not one row per event.</div>
+
+    <div class="cors-warning" id="cors-warning">
+      <strong>⚠ Quick setup needed:</strong> This file was opened directly from your desktop.<br>
+      To connect to the Mist API, you need to run it through a local web server first.<br><br>
+      <strong>Mac:</strong> Double-click <code>start_report.command</code> in the same folder.<br>
+      <strong>Windows:</strong> Double-click <code>start_report.bat</code> in the same folder.<br><br>
+      The browser will reopen automatically at the correct address.
+    </div>
+
+    <div class="field">
+      <label>API Token</label>
+      <span class="help-toggle" onclick="toggleTokenHelp()">▶ How do I get my API token?</span>
+      <div class="help-steps" id="token-help">
+        <ol>
+          <li>Log in to <strong>manage.mist.com</strong></li>
+          <li>Click your name in the top-right corner → <strong>My Profile</strong></li>
+          <li>Scroll down to <strong>API Token</strong> and click <strong>Create Token</strong></li>
+          <li>Give it a name (e.g. "Deny Log Report") and click <strong>Generate</strong></li>
+          <li>Copy the token — it will only be shown once</li>
+          <li>Paste it in the field below</li>
+        </ol>
+        <div style="margin-top:10px;color:var(--text-muted)">
+          <strong>Required access:</strong> The token needs org-level read access to NAC client events and sites. An org admin token works.
+        </div>
+      </div>
+      <input type="password" id="api-token" placeholder="Paste your Mist API token here" autocomplete="off">
+    </div>
+
+    <div class="field-row">
+      <div class="field">
+        <label>Cloud Region <span style="cursor:help;color:var(--text-muted)" title="Select the region that matches your Mist dashboard URL. Most customers use Global.">ⓘ</span></label>
+        <select id="region">
+          <option value="https://api.mist.com">Global (api.mist.com)</option>
+          <option value="https://api.eu.mist.com">Europe (api.eu.mist.com)</option>
+          <option value="https://api.gc1.mist.com">APAC (api.gc1.mist.com)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Lookback Window <span style="cursor:help;color:var(--text-muted)" title="How far back to look for deny events. 7 days is recommended to catch the 'Friday problem' — clients that failed before the weekend and went silent.">ⓘ</span></label>
+        <select id="lookback">
+          <option value="3">3 days</option>
+          <option value="7" selected>7 days</option>
+          <option value="14">14 days</option>
+        </select>
+      </div>
+    </div>
+
+    <button class="run-btn" id="run-btn" onclick="startLoad()">Connect &amp; Generate Report</button>
+    <div class="config-error" id="config-error"></div>
+
+    <div class="config-note">
+      🔒 <strong>Your token stays in your browser.</strong> It is never stored, logged, or sent anywhere except directly to the Mist API on your behalf. Close the tab to clear it.
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     LOADING SCREEN
+═══════════════════════════════════════════ -->
+<div id="loading-screen">
+  <div class="spinner"></div>
+  <div class="load-status" id="load-status">Connecting to Mist API...</div>
+  <div class="load-progress"><div class="load-bar" id="load-bar"></div></div>
+</div>
+
+<!-- ═══════════════════════════════════════════
+     DASHBOARD
+═══════════════════════════════════════════ -->
+<div id="dashboard">
+  <div class="header">
+    <div>
+      <div class="header-title">Deny Log Intelligence — <span id="hdr-org"></span></div>
+      <div class="header-meta" id="hdr-meta"></div>
+    </div>
+    <div class="header-right">
+      <span>Mist Access Assurance</span>
+      <button class="refresh-btn" onclick="resetToConfig()">↩ New Report</button>
+    </div>
+  </div>
+
+  <div class="main">
+    <!-- Metric cards -->
+    <div class="cards-row metric-cards">
+      <div class="card"><div class="card-label">Total Deny Events</div><div class="card-value" id="s-events">—</div><div class="card-sub" id="s-events-sub">7-day window</div></div>
+      <div class="card"><div class="card-label">Unique Clients</div><div class="card-value" id="s-clients">—</div><div class="card-sub">Deduplicated by MAC</div></div>
+      <div class="card"><div class="card-label">Sites Affected</div><div class="card-value" id="s-sites">—</div><div class="card-sub" id="s-sites-names"></div></div>
+      <div class="card"><div class="card-label">Cert Failures</div><div class="card-value cert-color" id="s-cert">—</div><div class="card-sub" id="s-cert-pct"></div></div>
+      <div class="card"><div class="card-label">Silent Failures <span id="silent-help" style="cursor:help;color:var(--text-muted)">ⓘ</span></div><div class="card-value" style="color:var(--silent)" id="s-silent">—</div><div class="card-sub" id="s-silent-sub">No retry in 8+ business hours</div></div>
+    </div>
+
+    <!-- Category filter cards -->
+    <div class="cards-row category-cards">
+      <div class="card clickable" onclick="toggleCat('cert')" id="cat-cert"><div class="cat-icon">🔐</div><div class="cat-count cert-color" id="cc-cert">—</div><div class="cat-label">Cert / TLS Issues</div></div>
+      <div class="card clickable" onclick="toggleCat('cred')" id="cat-cred"><div class="cat-icon">🔑</div><div class="cat-count cred-color" id="cc-cred">—</div><div class="cat-label">Wrong Credentials</div></div>
+      <div class="card clickable" onclick="toggleCat('mac')"  id="cat-mac" ><div class="cat-icon">📱</div><div class="cat-count mac-color"  id="cc-mac" >—</div><div class="cat-label">MAC Auth / Policy Failure</div></div>
+    </div>
+
+    <!-- Alert cards -->
+    <div id="alerts"></div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+      <div class="tab active"  onclick="switchTab('dashboard')">Dashboard</div>
+      <div class="tab"         onclick="switchTab('reasons')">Deny Reasons</div>
+      <div class="tab"         onclick="switchTab('timeline')">7-Day Timeline</div>
+      <div class="tab"         onclick="switchTab('notifications')">Notification Center</div>
+      <div class="tab"         onclick="switchTab('help')">? Help</div>
+    </div>
+
+    <!-- Dashboard tab -->
+    <div class="tab-content active" id="tab-dashboard">
+      <div class="section">
+        <div class="section-title">Client Deny Summary</div>
+        <div class="filter-bar">
+          <input type="text" id="search" placeholder="Search MAC, username, site, reason..." oninput="renderTable()">
+          <select id="f-site"   onchange="renderTable()"><option value="">All Sites</option></select>
+          <select id="f-status" onchange="renderTable()">
+            <option value="">All Statuses</option>
+            <option value="failing">Failing — active within business hours</option>
+            <option value="silent">Silent — missed a full business day</option>
+            <option value="resolved">Resolved — permit seen</option>
+          </select>
+          <select id="f-reason" onchange="renderTable()"><option value="">All Deny Reasons</option></select>
+          <span class="clear-btn" onclick="clearFilters()">Clear filters</span>
+          <span class="result-count" id="result-count"></span>
+        </div>
+        <div class="table-wrapper">
+          <table>
+            <thead><tr>
+              <th onclick="sortBy('mac')">MAC / User</th>
+              <th onclick="sortBy('site')">Site</th>
+              <th onclick="sortBy('category')">Category</th>
+              <th onclick="sortBy('primaryText')" style="min-width:220px">Deny Reason</th>
+              <th onclick="sortBy('firstSeen')">First Seen</th>
+              <th onclick="sortBy('lastSeen')">Last Seen</th>
+              <th onclick="sortBy('daysFailing')">Days</th>
+              <th onclick="sortBy('attempts')">Attempts</th>
+              <th onclick="sortBy('blastScore')" title="Blast radius = how many clients share the same deny reason. HIGH = systemic issue.">Blast ⓘ</th>
+              <th onclick="sortBy('status')">Status</th>
+            </tr></thead>
+            <tbody id="tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Deny Reasons tab -->
+    <div class="tab-content" id="tab-reasons">
+      <div class="section">
+        <div class="section-title">Deny Reason Breakdown — blast radius by shared failure cause · click a reason to filter the client table</div>
+        <div id="reasons-list"></div>
+      </div>
+    </div>
+
+    <!-- Timeline tab -->
+    <div class="tab-content" id="tab-timeline">
+      <div class="section">
+        <div class="section-title">7-Day Persistence Timeline — one bar per client per day</div>
+        <div id="timeline"></div>
+      </div>
+    </div>
+
+    <!-- Notifications tab -->
+    <div class="tab-content" id="tab-notifications">
+      <div class="section">
+        <div class="section-title">Notification Center — Per-Site Email</div>
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">Select a site to compose a pre-populated remediation email:</div>
+        <div class="site-selector" id="site-selector"></div>
+        <div id="email-composer"></div>
+      </div>
+      <div class="section" style="margin-top:0">
+        <div class="section-title">NOC Digest — All Sites</div>
+        <div class="email-box">
+          <div class="email-field"><label>Subject</label><input id="noc-subject" type="text"></div>
+          <div class="email-field"><label>Body</label><textarea id="noc-body"></textarea></div>
+          <div class="btn-row"><button class="btn btn-secondary" onclick="copy('noc-subject','noc-body')">Copy to Clipboard</button></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Help tab -->
+    <div class="tab-content" id="tab-help">
+      <div class="section">
+
+        <div class="help-section">
+          <h3>What is this tool?</h3>
+          <p>The Deny Log Intelligence dashboard transforms raw RADIUS deny events from Mist Access Assurance into a client-centric view. Instead of seeing hundreds of identical rows for a single broken device, you get <strong>one record per client</strong> — showing exactly why it's failing, how long it's been failing, and who else is hitting the same issue.</p>
+        </div>
+
+        <div class="help-section">
+          <h3>Metric Cards (top row)</h3>
+          <table class="help-table">
+            <thead><tr><th>Card</th><th>What it means</th></tr></thead>
+            <tbody>
+              <tr><td>Total Deny Events</td><td>The raw number of individual RADIUS deny events from the Mist API in the selected time window. One broken client retrying 50 times = 50 events.</td></tr>
+              <tr><td>Unique Clients</td><td>The number of distinct devices (by MAC address) that have at least one deny event. This is the number that actually matters for triage.</td></tr>
+              <tr><td>Sites Affected</td><td>How many distinct Mist sites have at least one failing client.</td></tr>
+              <tr><td>Cert Failures</td><td>Clients whose primary failure reason is a certificate or TLS trust issue — typically the most common and most fixable category.</td></tr>
+              <tr><td>Silent Failures</td><td>Clients that failed but have not retried in 8+ business hours (Mon–Fri, 7am–7pm). These are invisible in real-time dashboards. See <em>Status</em> below for full definition.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="help-section">
+          <h3>Failure Categories</h3>
+          <table class="help-table">
+            <thead><tr><th>Category</th><th>Meaning</th><th>Common fix</th></tr></thead>
+            <tbody>
+              <tr><td>🔐 Cert / TLS Issue</td><td>The device doesn't trust the RADIUS server certificate, or its own client certificate is missing, expired, or from an untrusted CA.</td><td>Deploy the Mist org certificate to the device via MDM. Go to Organization → Access → Certificates to download it.</td></tr>
+              <tr><td>🔑 Wrong Credentials</td><td>The username or password was rejected by the identity provider (IdP). The device itself may be fine.</td><td>Verify credentials, check account is not locked, confirm the user's IdP group grants network access.</td></tr>
+              <tr><td>📱 MAC Auth / Policy Failure</td><td>The device hit the implicit deny — no NAC policy rule matched it. Often a managed device not yet enrolled, or a policy misconfiguration.</td><td>Confirm the MAC is in the correct enrollment list. Check that a NAC rule exists for this device type or SSID.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="help-section">
+          <h3>Client Status</h3>
+          <table class="help-table">
+            <thead><tr><th>Status</th><th>Definition</th><th>Action</th></tr></thead>
+            <tbody>
+              <tr><td><span class="badge badge-failing">failing</span></td><td>The client has a deny event within the last 8 business hours. It is actively trying and being rejected right now.</td><td>Immediate — the user is likely on-site and unable to connect.</td></tr>
+              <tr><td><span class="badge badge-silent">silent</span></td><td>The client's last deny event was more than 8 business hours ago (Mon–Fri, 7am–7pm) and no successful auth has been seen. It stopped retrying — the user may have given up or is working from home. Weekend hours are excluded, so a Friday failure won't flip to silent until Monday.</td><td>Proactive — reach out before the user files a ticket on Monday morning.</td></tr>
+              <tr><td><span class="badge badge-resolved">resolved</span></td><td>A successful RADIUS permit event was seen for this client within the lookback window, after the deny events.</td><td>No action needed. Monitor to confirm it doesn't reappear.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="help-section">
+          <h3>Blast Radius</h3>
+          <p>Blast radius measures how many clients share the <strong>exact same deny reason text</strong>. A high blast radius means a systemic issue — for example, a certificate that wasn't deployed to all managed Windows devices, causing 20 machines to fail with the same error message.</p>
+          <table class="help-table">
+            <thead><tr><th>Score</th><th>Threshold</th><th>What it suggests</th></tr></thead>
+            <tbody>
+              <tr><td><span class="badge badge-high">HIGH</span></td><td>5 or more clients with the same deny reason</td><td>Systemic — likely a policy change, failed MDM deployment, or cert rollout that missed a fleet of devices.</td></tr>
+              <tr><td><span class="badge badge-med">MED</span></td><td>3–4 clients with the same deny reason</td><td>Small group pattern — possibly a shared policy, same device model, or same SSID configuration issue.</td></tr>
+              <tr><td><span class="badge badge-low">LOW</span></td><td>1–2 clients with this deny reason</td><td>Isolated — specific to that device. Likely a misconfigured endpoint or user account issue.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="help-section">
+          <h3>Deny Reasons Tab</h3>
+          <p>This tab lists every unique error message returned by the RADIUS server, sorted by how many clients are hitting it. Click any row to jump to the Dashboard tab filtered to only those clients. This is the fastest path to triage: see the most impactful error first, then act on it.</p>
+        </div>
+
+        <div class="help-section">
+          <h3>7-Day Timeline</h3>
+          <p>Shows a row per client with colored blocks for each day they had deny events. This makes it easy to spot:</p>
+          <ul>
+            <li><strong>Persistent failures</strong> — colored blocks spanning the full 7-day window</li>
+            <li><strong>Sudden onset</strong> — all clients start failing on the same day (likely a policy or cert change)</li>
+            <li><strong>Silent failures</strong> — colored blocks only on early days, nothing recent</li>
+          </ul>
+          <p style="margin-top:8px">Colors match the category: <span style="color:var(--cert)">■ orange = cert</span> · <span style="color:var(--cred)">■ purple = credentials</span> · <span style="color:var(--mac)">■ teal = MAC/policy</span></p>
+        </div>
+
+        <div class="help-section">
+          <h3>Notification Center</h3>
+          <p>Pre-written emails ready to send. Select a site to see an email addressed to that site's building tech or IT contact, pre-populated with the affected MACs, deny reasons, and step-by-step remediation instructions. Edit as needed before sending. The NOC Digest covers all sites in a single summary email.</p>
+        </div>
+
+        <div class="help-section">
+          <h3>Frequently Asked Questions</h3>
+          <table class="help-table">
+            <tbody>
+              <tr><td>Why does my client show as "silent" even though it failed today?</td><td>Silent requires 8+ <em>business</em> hours without a retry. If the failure happened today but earlier in the day, it may not have crossed the threshold yet.</td></tr>
+              <tr><td>A client shows "resolved" but the user says they still can't connect.</td><td>Resolved means a permit was seen in the lookback window — but it may have failed again after. Try a shorter lookback window (3 days) to see only recent events.</td></tr>
+              <tr><td>I see the same MAC with different usernames.</td><td>That's normal for shared devices or devices that re-authenticate under different accounts. The MAC is the primary key; usernames are shown for reference.</td></tr>
+              <tr><td>The report shows 0 clients but I know there are failures.</td><td>Check that your token has org-level (not site-level) access. Site-level tokens can only see one site and may miss cross-site events.</td></tr>
+              <tr><td>Can I extend the lookback beyond 14 days?</td><td>Event retention in Mist varies by org tier. If you request 14 days but your org only retains 7, you'll see 7 days of data with no error.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+      </div>
+    </div>
+
+  </div><!-- /.main -->
+</div><!-- /#dashboard -->
+
+<script>
+// ════════════════════════════════════════════════════════════
+// STARTUP — detect file:// and show warning
+// ════════════════════════════════════════════════════════════
+if (window.location.protocol === 'file:') {
+  document.getElementById('cors-warning').style.display = 'block';
+  document.getElementById('run-btn').disabled = true;
+}
+
+function toggleTokenHelp() {
+  const el = document.getElementById('token-help');
+  const toggle = document.querySelector('.help-toggle');
+  const open = el.style.display === 'block';
+  el.style.display = open ? 'none' : 'block';
+  toggle.textContent = (open ? '▶' : '▼') + ' How do I get my API token?';
+}
+
+// ════════════════════════════════════════════════════════════
+// CONSTANTS
+// ════════════════════════════════════════════════════════════
+const CATEGORY_LABELS = { cert: 'Cert / TLS Issue', cred: 'Wrong Credentials', mac: 'MAC Auth / Policy Failure' };
+const CATEGORY_REMEDIATION = {
+  cert: 'Deploy updated client certificate via MDM. Cert chain must include the issuing CA trusted by the RADIUS server. Verify the client is configured to trust the Mist Authentication Service certificate (Organization > Access > Certificates).',
+  cred: 'Verify username/password are correct and the account is not locked or expired. Check that the IdP group membership allows network access. Re-enroll the device if credentials were recently rotated.',
+  mac:  'Confirm the device MAC address is enrolled in the correct MAC Auth list. Review NAC policy rules — the device is hitting the implicit deny. Check if the SSID or port policy requires a matching rule for this device type.',
+};
+const DENY_TYPES = new Set(['NAC_CLIENT_DENY', 'NAC_SERVER_CERT_VALIDATION_FAILURE']);
+const BIZ_START = 7, BIZ_END = 19, SILENCE_BIZ_HOURS = 8;
+
+// ════════════════════════════════════════════════════════════
+// STATE
+// ════════════════════════════════════════════════════════════
+let REPORT = null;
+let activeCat = null, activeReason = null, sortKey = 'blastCount', sortDir = -1;
+let BASE_URL = 'https://api.mist.com', TOKEN = '', LOOKBACK_DAYS = 7;
+
+// ════════════════════════════════════════════════════════════
+// API LAYER
+// ════════════════════════════════════════════════════════════
+async function mistFetch(path, params = {}) {
+  const url = new URL(BASE_URL + path);
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  const res = await fetch(url.toString(), {
+    headers: { 'Authorization': `Token ${TOKEN}`, 'Content-Type': 'application/json' }
+  });
+  if (!res.ok) {
+    const msg = await res.text().catch(() => res.statusText);
+    throw new Error(`Mist API ${res.status}: ${msg}`);
+  }
+  return res.json();
+}
+
+async function fetchAllNacEvents(orgId, lookbackDays) {
+  const allEvents = [];
+  const start = Math.floor(Date.now() / 1000) - lookbackDays * 86400;
+  let page = 1;
+  const limit = 1000;
+
+  setLoadStatus(`Fetching deny events...`, 20);
+
+  while (true) {
+    const data = await mistFetch(`/api/v1/orgs/${orgId}/nac_clients/events/search`, {
+      start, limit, page,
+    });
+    const results = data.results || [];
+    allEvents.push(...results);
+
+    const total = data.total || data.estimated_total || results.length;
+    const pct = Math.min(85, 20 + Math.round((allEvents.length / Math.max(total, 1)) * 65));
+    setLoadStatus(`Fetched ${allEvents.length.toLocaleString()} of ~${total.toLocaleString()} events...`, pct);
+
+    if (results.length < limit) break;
+    page++;
+  }
+  return allEvents;
+}
+
+async function fetchSites(orgId) {
+  const data = await mistFetch(`/api/v1/orgs/${orgId}/sites`);
+  const list = Array.isArray(data) ? data : (data.results || []);
+  return Object.fromEntries(list.map(s => [s.id, s.name]));
+}
+
+// ════════════════════════════════════════════════════════════
+// AGGREGATION ENGINE (JS port of deny_report.py)
+// ════════════════════════════════════════════════════════════
+function classifyEvent(event) {
+  const t = (event.type || '');
+  const txt = (event.text || '').toLowerCase();
+  const auth = (event.auth_type || '');
+  if (t === 'NAC_SERVER_CERT_VALIDATION_FAILURE') return 'cert';
+  if (txt.includes('certificate') || txt.includes('cert') || txt.includes('tls') || txt.includes('ca ')) return 'cert';
+  if (auth === 'device-auth') return 'mac';
+  if (txt.includes('policy rules') || txt.includes('implicit deny') || txt.includes('no policy')) return 'mac';
+  return 'cred';
+}
+
+function businessHoursElapsed(fromTs, toTs) {
+  if (toTs <= fromTs) return 0;
+  let hours = 0;
+  // Walk in 1-hour steps
+  let cur = fromTs;
+  while (cur < toTs) {
+    const next = Math.min(cur + 3600, toTs);
+    const dt = new Date(cur * 1000);
+    const dow = dt.getUTCDay(); // Sun=0 Mon=1 ... Sat=6
+    const h = dt.getUTCHours();
+    if (dow >= 1 && dow <= 5 && h >= BIZ_START && h < BIZ_END) {
+      hours += (next - cur) / 3600;
+    }
+    cur += 3600;
+  }
+  return hours;
+}
+
+function buildDayLabels(lookbackDays) {
+  const labels = [];
+  const now = new Date();
+  for (let i = lookbackDays - 1; i >= 0; i--) {
+    const d = new Date(now);
+    d.setUTCDate(d.getUTCDate() - i);
+    labels.push(d.toISOString().slice(0, 10));
+  }
+  return labels;
+}
+
+function aggregateEvents(events, siteMap, lookbackDays) {
+  const nowTs = Date.now() / 1000;
+  const windowStart = nowTs - lookbackDays * 86400;
+  const dayLabels = buildDayLabels(lookbackDays);
+  const clientMap = {};
+  const permitMacs = new Set();
+
+  for (const ev of events) {
+    if (ev.type === 'NAC_CLIENT_PERMIT') { permitMacs.add(ev.mac || ''); continue; }
+    if (!DENY_TYPES.has(ev.type)) continue;
+    const ts = Number(ev.timestamp || 0);
+    if (ts < windowStart) continue;
+
+    const mac = ev.mac || ev.username || 'unknown';
+    const dayKey = new Date(ts * 1000).toISOString().slice(0, 10);
+
+    if (!clientMap[mac]) {
+      clientMap[mac] = {
+        mac, site_id: '', site: '', ssid: '', username: '', auth_type: '',
+        category: null, firstSeen: null, lastSeen: null, attempts: 0,
+        daysActive: new Set(), dayCounts: {}, textCounts: {},
+      };
+    }
+    const c = clientMap[mac];
+    c.site_id   = ev.site_id || c.site_id;
+    c.site      = siteMap[ev.site_id] || ev.site_id || c.site;
+    c.ssid      = ev.ssid || c.ssid;
+    c.username  = ev.username || c.username;
+    c.auth_type = ev.auth_type || c.auth_type;
+    c.attempts++;
+    c.daysActive.add(dayKey);
+    c.dayCounts[dayKey] = (c.dayCounts[dayKey] || 0) + 1;
+    if (ev.text) c.textCounts[ev.text] = (c.textCounts[ev.text] || 0) + 1;
+    if (c.firstSeen === null || ts < c.firstSeen) c.firstSeen = ts;
+    if (c.lastSeen  === null || ts > c.lastSeen)  c.lastSeen  = ts;
+
+    const cat = classifyEvent(ev);
+    const pri = { cert: 3, cred: 2, mac: 1 };
+    if (!c.category || (pri[cat] || 0) > (pri[c.category] || 0)) c.category = cat;
+  }
+
+  // Build result array
+  const result = Object.values(clientMap).map(c => {
+    const daysFailing = c.daysActive.size;
+    const primaryText = Object.entries(c.textCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || '';
+    const allTexts = Object.entries(c.textCounts).sort((a, b) => b[1] - a[1]).map(([text, count]) => ({ text, count }));
+    const activity = Object.fromEntries(dayLabels.map(d => [d, c.dayCounts[d] || 0]));
+
+    let status;
+    if (permitMacs.has(c.mac)) {
+      status = 'resolved';
+    } else {
+      const bizHours = businessHoursElapsed(c.lastSeen || nowTs, nowTs);
+      status = bizHours >= SILENCE_BIZ_HOURS ? 'silent' : 'failing';
+    }
+
+    return {
+      mac: c.mac, site_id: c.site_id, site: c.site, ssid: c.ssid,
+      username: c.username, auth_type: c.auth_type,
+      category: c.category || 'mac',
+      categoryLabel: CATEGORY_LABELS[c.category || 'mac'],
+      remediation: CATEGORY_REMEDIATION[c.category || 'mac'],
+      firstSeen: c.firstSeen, lastSeen: c.lastSeen,
+      daysFailing, attempts: c.attempts,
+      status, blastScore: 'low', blastCount: 1,
+      activity, primaryText, allTexts,
+    };
+  });
+
+  // Blast radius — cross-client: how many clients share the same primary deny reason?
+  const reasonCounts = {};
+  result.forEach(c => { if (c.primaryText) reasonCounts[c.primaryText] = (reasonCounts[c.primaryText] || 0) + 1; });
+  result.forEach(c => {
+    const n = reasonCounts[c.primaryText] || 1;
+    c.blastCount = n;
+    c.blastScore = n >= 5 ? 'high' : n >= 3 ? 'med' : 'low';
+  });
+
+  // Sort: most systemic first, then most days failing
+  result.sort((a, b) => (b.blastCount - a.blastCount) || (b.daysFailing - a.daysFailing));
+
+  // Deny reasons breakdown
+  const reasonMap = {};
+  result.forEach(c => {
+    c.allTexts.forEach(({ text, count }) => {
+      if (!reasonMap[text]) reasonMap[text] = { text, clients: [], totalEvents: 0 };
+      reasonMap[text].clients.push({ mac: c.mac, username: c.username, site: c.site, count, category: c.category });
+      reasonMap[text].totalEvents += count;
+    });
+  });
+  const denyReasons = Object.values(reasonMap)
+    .map(r => ({ ...r, clientCount: r.clients.length }))
+    .sort((a, b) => (b.clientCount - a.clientCount) || (b.totalEvents - a.totalEvents));
+
+  return { clients: result, denyReasons, dayLabels };
+}
+
+// ════════════════════════════════════════════════════════════
+// LOAD FLOW
+// ════════════════════════════════════════════════════════════
+function setLoadStatus(msg, pct) {
+  document.getElementById('load-status').textContent = msg;
+  document.getElementById('load-bar').style.width = pct + '%';
+}
+
+async function startLoad() {
+  TOKEN = document.getElementById('api-token').value.trim();
+  BASE_URL = document.getElementById('region').value;
+  LOOKBACK_DAYS = parseInt(document.getElementById('lookback').value);
+  const errEl = document.getElementById('config-error');
+  errEl.style.display = 'none';
+
+  if (!TOKEN) { showError('Please enter your Mist API token.'); return; }
+
+  document.getElementById('run-btn').disabled = true;
+  document.getElementById('config-screen').style.display = 'none';
+  document.getElementById('loading-screen').style.display = 'flex';
+
+  try {
+    setLoadStatus('Authenticating...', 5);
+    const self = await mistFetch('/api/v1/self');
+    const privs = self.privileges || [];
+    const orgPriv = privs.find(p => p.scope === 'org');
+    if (!orgPriv) throw new Error('No org-level access found for this token. An org-scoped token is required.');
+
+    const orgId   = orgPriv.org_id;
+    const orgName = orgPriv.name || orgId;
+
+    setLoadStatus('Fetching site list...', 12);
+    const siteMap = await fetchSites(orgId);
+
+    const events = await fetchAllNacEvents(orgId, LOOKBACK_DAYS);
+
+    setLoadStatus('Aggregating client records...', 90);
+    const { clients, denyReasons, dayLabels } = aggregateEvents(events, siteMap, LOOKBACK_DAYS);
+
+    const totalDeny = events.filter(e => DENY_TYPES.has(e.type)).length;
+
+    REPORT = {
+      orgName, orgId, generatedAt: Date.now() / 1000,
+      lookbackDays: LOOKBACK_DAYS, totalRawEvents: totalDeny,
+      clients, denyReasons, dayLabels, siteMap,
+    };
+
+    setLoadStatus('Rendering dashboard...', 98);
+    await new Promise(r => setTimeout(r, 200));
+    showDashboard();
+  } catch (err) {
+    document.getElementById('loading-screen').style.display = 'none';
+    document.getElementById('config-screen').style.display = 'flex';
+    document.getElementById('run-btn').disabled = false;
+    showError(err.message || String(err));
+  }
+}
+
+function showError(msg) {
+  const el = document.getElementById('config-error');
+  el.textContent = '⚠ ' + msg;
+  el.style.display = 'block';
+}
+
+function resetToConfig() {
+  REPORT = null; activeCat = null; activeReason = null;
+  document.getElementById('dashboard').style.display = 'none';
+  document.getElementById('config-screen').style.display = 'flex';
+  document.getElementById('run-btn').disabled = false;
+}
+
+// ════════════════════════════════════════════════════════════
+// DASHBOARD RENDER
+// ════════════════════════════════════════════════════════════
+function showDashboard() {
+  document.getElementById('loading-screen').style.display = 'none';
+  document.getElementById('dashboard').style.display = 'block';
+
+  const { orgName, generatedAt, lookbackDays, totalRawEvents, clients } = REPORT;
+  document.getElementById('hdr-org').textContent  = orgName;
+  document.getElementById('hdr-meta').textContent =
+    `Generated ${fmtTs(generatedAt)} · ${lookbackDays}-day window · ${totalRawEvents.toLocaleString()} raw events`;
+  document.getElementById('s-events-sub').textContent = `${lookbackDays}-day window`;
+
+  const certC  = clients.filter(c => c.category === 'cert');
+  const silent = clients.filter(c => c.status === 'silent');
+  const sites  = [...new Set(clients.map(c => c.site).filter(Boolean))];
+
+  document.getElementById('s-events').textContent   = totalRawEvents.toLocaleString();
+  document.getElementById('s-clients').textContent  = clients.length;
+  document.getElementById('s-sites').textContent    = sites.length;
+  document.getElementById('s-sites-names').textContent = sites.slice(0,3).join(', ') + (sites.length > 3 ? '…' : '');
+  document.getElementById('s-cert').textContent     = certC.length;
+  document.getElementById('s-cert-pct').textContent = clients.length ? `${Math.round(certC.length/clients.length*100)}% of clients` : '';
+  document.getElementById('s-silent').textContent   = silent.length;
+  document.getElementById('silent-help').title =
+    `Silent = no retry in ${SILENCE_BIZ_HOURS} business hours (Mon–Fri ${BIZ_START}:00–${BIZ_END}:00). Weekend hours excluded — a client that failed Friday evening won't flip to silent until it has missed a full business day.`;
+
+  ['cert','cred','mac'].forEach(cat =>
+    document.getElementById(`cc-${cat}`).textContent = clients.filter(c => c.category === cat).length
+  );
+
+  // Populate filter dropdowns
+  const siteEl = document.getElementById('f-site');
+  siteEl.innerHTML = '<option value="">All Sites</option>';
+  sites.sort().forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = s; siteEl.appendChild(o); });
+
+  const reasonEl = document.getElementById('f-reason');
+  reasonEl.innerHTML = '<option value="">All Deny Reasons</option>';
+  REPORT.denyReasons.forEach(r => {
+    const o = document.createElement('option');
+    o.value = r.text;
+    o.textContent = r.text.length > 70 ? r.text.slice(0, 67) + '...' : r.text;
+    reasonEl.appendChild(o);
+  });
+
+  renderAlerts();
+  renderTable();
+  renderDenyReasons();
+  renderTimeline();
+  renderNotifications();
+  renderNocDigest();
+  switchTab('dashboard');
+}
+
+// ════════════════════════════════════════════════════════════
+// ALERTS
+// ════════════════════════════════════════════════════════════
+function renderAlerts() {
+  const clients = REPORT.clients;
+  const alerts = [];
+
+  const certC = clients.filter(c => c.category === 'cert');
+  if (certC.length) {
+    const startDays = {};
+    certC.forEach(c => {
+      if (c.firstSeen) {
+        const d = new Date(c.firstSeen * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        startDays[d] = (startDays[d] || 0) + 1;
+      }
+    });
+    const wave = Object.entries(startDays).filter(([,n]) => n >= 2).sort((a,b) => b[1]-a[1]);
+    if (wave.length) {
+      const [day, count] = wave[0];
+      const waveSites = [...new Set(certC.map(c => c.site).filter(Boolean))];
+      alerts.push({ type: 'cert', title: `Cert failure wave — ${count} clients started failing around ${day}`, body: `Affected sites: ${waveSites.join(', ')}. Likely a certificate rollout or policy change.` });
+    }
+  }
+
+  const silent = clients.filter(c => c.status === 'silent');
+  if (silent.length) {
+    alerts.push({ type: 'silent', title: `${silent.length} silent failure${silent.length > 1 ? 's' : ''} — clients that failed and stopped retrying`, body: `These clients are invisible in a real-time event view. Last seen: ${silent.map(c => fmtDate(c.lastSeen)).join(', ')}.` });
+  }
+
+  // High blast radius groups
+  const highBlast = clients.filter(c => c.blastScore === 'high');
+  if (highBlast.length) {
+    const groups = {};
+    highBlast.forEach(c => { groups[c.primaryText] = (groups[c.primaryText] || []).concat(c); });
+    Object.entries(groups).forEach(([reason, group]) => {
+      const sites = [...new Set(group.map(c => c.site).filter(Boolean))];
+      alerts.push({ type: 'high', title: `Systemic issue — ${group.length} clients sharing the same deny reason across ${sites.length} site${sites.length>1?'s':''}`, body: `Reason: "${reason.slice(0, 120)}${reason.length > 120 ? '…' : ''}"` });
+    });
+  }
+
+  document.getElementById('alerts').innerHTML = alerts.map(a => `
+    <div class="alert-card ${a.type === 'silent' ? 'silent' : ''}">
+      <div class="alert-title">${a.type === 'silent' ? '👻' : a.type === 'high' ? '🚨' : '⚠️'} ${a.title}</div>
+      <div class="alert-body">${a.body}</div>
+    </div>`).join('');
+}
+
+// ════════════════════════════════════════════════════════════
+// CLIENT TABLE
+// ════════════════════════════════════════════════════════════
+function getFiltered() {
+  let list = [...REPORT.clients];
+  const search = document.getElementById('search').value.toLowerCase();
+  const fSite   = document.getElementById('f-site').value;
+  const fStatus = document.getElementById('f-status').value;
+  const fReason = document.getElementById('f-reason').value;
+
+  if (activeCat) list = list.filter(c => c.category === activeCat);
+  if (activeReason) list = list.filter(c => c.allTexts.some(t => t.text === activeReason));
+  if (fSite)   list = list.filter(c => c.site === fSite);
+  if (fStatus) list = list.filter(c => c.status === fStatus);
+  if (fReason) list = list.filter(c => c.allTexts.some(t => t.text === fReason));
+  if (search)  list = list.filter(c =>
+    [c.mac, c.username, c.site, c.ssid, c.primaryText].some(v => (v||'').toLowerCase().includes(search))
+  );
+
+  const blastOrd = { high: 3, med: 2, low: 1 };
+  list.sort((a, b) => {
+    let av = a[sortKey], bv = b[sortKey];
+    if (sortKey === 'blastScore') { av = blastOrd[av] || 0; bv = blastOrd[bv] || 0; }
+    return (av < bv ? 1 : av > bv ? -1 : 0) * sortDir;
+  });
+  return list;
+}
+
+function sortBy(key) {
+  sortDir = sortKey === key ? sortDir * -1 : -1;
+  sortKey = key;
+  renderTable();
+}
+
+function toggleCat(cat) {
+  activeCat = activeCat === cat ? null : cat;
+  ['cert','cred','mac'].forEach(c => document.getElementById(`cat-${c}`).classList.toggle('active-filter', c === activeCat));
+  renderTable();
+}
+
+function clearFilters() {
+  document.getElementById('search').value = '';
+  document.getElementById('f-site').value = '';
+  document.getElementById('f-status').value = '';
+  document.getElementById('f-reason').value = '';
+  activeCat = null; activeReason = null;
+  ['cert','cred','mac'].forEach(c => document.getElementById(`cat-${c}`).classList.remove('active-filter'));
+  document.querySelectorAll('.reason-row').forEach(r => r.classList.remove('active-reason'));
+  renderTable();
+}
+
+function renderTable() {
+  const list = getFiltered();
+  document.getElementById('result-count').textContent = `${list.length} client${list.length !== 1 ? 's' : ''}`;
+  const rows = list.map(c => {
+    const label = (c.username && c.username !== c.mac)
+      ? `${c.mac}<br><small style="color:var(--text-muted)">${c.username}</small>` : c.mac;
+    const short = (c.primaryText || '').length > 60 ? c.primaryText.slice(0, 57) + '…' : c.primaryText;
+    const tip   = c.allTexts.map(t => `${t.text} (×${t.count})`).join('\n');
+    const extra = c.allTexts.length > 1 ? `<br><small style="color:var(--text-muted)">+${c.allTexts.length-1} more</small>` : '';
+    const reason = short ? `<span title="${tip.replace(/"/g,'&quot;')}" style="cursor:help">${short}</span>${extra}` : '—';
+    return `<tr>
+      <td class="mac-cell">${label||'—'}</td>
+      <td>${c.site||'—'}${c.ssid?`<br><small style="color:var(--text-muted)">${c.ssid}</small>`:''}</td>
+      <td><span class="badge badge-${c.category}">${c.categoryLabel}</span></td>
+      <td style="font-size:12px;line-height:1.4">${reason}</td>
+      <td>${fmtDate(c.firstSeen)}</td>
+      <td>${fmtDate(c.lastSeen)}</td>
+      <td style="text-align:center;font-weight:700">${c.daysFailing}</td>
+      <td style="text-align:center">${c.attempts}</td>
+      <td title="${c.blastCount} client${c.blastCount!==1?'s':''} share this deny reason">
+        <span class="badge badge-${c.blastScore}">${c.blastScore.toUpperCase()}</span>
+        <br><small style="color:var(--text-muted)">${c.blastCount} client${c.blastCount!==1?'s':''}</small>
+      </td>
+      <td><span class="badge badge-${c.status}">${c.status}</span></td>
+    </tr>`;
+  }).join('');
+  document.getElementById('tbody').innerHTML = rows ||
+    '<tr><td colspan="10" style="text-align:center;color:var(--text-muted);padding:32px">No clients match the current filters.</td></tr>';
+}
+
+// ════════════════════════════════════════════════════════════
+// DENY REASONS
+// ════════════════════════════════════════════════════════════
+function renderDenyReasons() {
+  const reasons = REPORT.denyReasons;
+  if (!reasons.length) { document.getElementById('reasons-list').innerHTML = '<p style="color:var(--text-muted)">No deny events found.</p>'; return; }
+  const max = reasons[0].clientCount;
+  document.getElementById('reasons-list').innerHTML = reasons.map((r, idx) => {
+    const barW = Math.max(4, Math.round(r.clientCount / max * 120));
+    const cat  = r.clients[0]?.category || 'mac';
+    const macs = r.clients.map(c => c.username && c.username !== c.mac ? c.username : c.mac).join(', ');
+    const col  = cat === 'cert' ? 'var(--cert)' : cat === 'cred' ? 'var(--cred)' : 'var(--mac)';
+    return `<div class="reason-row" id="rr-${idx}" onclick="filterByReason('${r.text.replace(/'/g,"\\'").replace(/"/g,'&quot;')}',${idx})">
+      <div class="reason-bar-wrap">
+        <div class="reason-bar" style="width:${barW}px;background:${col}"></div>
+        <span class="reason-client-count">${r.clientCount} client${r.clientCount!==1?'s':''} · ${r.totalEvents} events</span>
+      </div>
+      <div class="reason-text">${r.text}<div class="reason-macs">${macs}</div></div>
+      <span class="badge badge-${cat}">${cat}</span>
+    </div>`;
+  }).join('');
+}
+
+function filterByReason(text, idx) {
+  activeReason = activeReason === text ? null : text;
+  document.querySelectorAll('.reason-row').forEach(r => r.classList.remove('active-reason'));
+  if (activeReason) document.getElementById(`rr-${idx}`)?.classList.add('active-reason');
+  switchTab('dashboard');
+  renderTable();
+}
+
+// ════════════════════════════════════════════════════════════
+// TIMELINE
+// ════════════════════════════════════════════════════════════
+function renderTimeline() {
+  const { clients, dayLabels } = REPORT;
+  const hdr = dayLabels.map(d => {
+    const dt = new Date(d + 'T12:00:00Z');
+    return `<div class="timeline-day-label">${dt.toLocaleDateString(undefined,{month:'short',day:'numeric'})}</div>`;
+  }).join('');
+  const rows = clients.map(c => {
+    const lbl = c.username && c.username !== c.mac ? `${c.mac} / ${c.username}` : c.mac;
+    const cells = dayLabels.map(d => {
+      const n = c.activity[d] || 0;
+      return `<div class="timeline-cell ${n > 0 ? c.category : ''}" title="${n > 0 ? `${lbl} · ${d} · ${n} attempts` : ''}"></div>`;
+    }).join('');
+    return `<div class="timeline-row">
+      <div class="timeline-client-label" title="${lbl}">${c.username || c.mac}</div>
+      <div class="timeline-cells">${cells}</div>
+    </div>`;
+  }).join('');
+  document.getElementById('timeline').innerHTML =
+    `<div class="timeline-header">${hdr}</div>${rows}`;
+}
+
+// ════════════════════════════════════════════════════════════
+// NOTIFICATIONS
+// ════════════════════════════════════════════════════════════
+let activeSite = null;
+
+function renderNotifications() {
+  const sites = [...new Set(REPORT.clients.map(c => c.site).filter(Boolean))].sort();
+  document.getElementById('site-selector').innerHTML = sites.map(s =>
+    `<div class="site-btn" id="sb-${s.replace(/\W/g,'_')}" onclick="selectSite('${s.replace(/'/g,"\\'")}')"> ${s}</div>`
+  ).join('');
+  if (sites.length) selectSite(sites[0]);
+}
+
+function selectSite(site) {
+  activeSite = site;
+  document.querySelectorAll('.site-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(`sb-${site.replace(/\W/g,'_')}`)?.classList.add('active');
+
+  const sc = REPORT.clients.filter(c => c.site === site);
+  const byCat = { cert: [], cred: [], mac: [] };
+  sc.forEach(c => (byCat[c.category] || byCat.mac).push(c));
+
+  const subject = `[Mist NAC] Access Failures — ${site} — ${new Date().toLocaleDateString()}`;
+  let body = `Hi team,\n\nWe are seeing RADIUS authentication failures at ${site}.\nThis is an automated alert from the Mist Deny Log Intelligence dashboard.\n\n`;
+  body += `SUMMARY\n${'─'.repeat(50)}\nTotal affected clients: ${sc.length}\nWindow: Last ${REPORT.lookbackDays} days\n\n`;
+
+  ['cert','cred','mac'].forEach(cat => {
+    const cc = byCat[cat];
+    if (!cc.length) return;
+    body += `${CATEGORY_LABELS[cat].toUpperCase()} (${cc.length} client${cc.length>1?'s':''})\n${'─'.repeat(40)}\n`;
+    cc.forEach(c => {
+      body += `  • MAC: ${c.mac}`;
+      if (c.username && c.username !== c.mac) body += `  User: ${c.username}`;
+      body += `  — ${c.daysFailing} day${c.daysFailing>1?'s':''}, ${c.attempts} attempts (${c.status})\n`;
+      if (c.primaryText) body += `    Error: ${c.primaryText}\n`;
+    });
+    body += `\nRemediation: ${CATEGORY_REMEDIATION[cat]}\n\n`;
+  });
+  body += `Reply to this email or contact the NOC for assistance.\n\nRegards,\nNetwork Operations Center`;
+
+  document.getElementById('email-composer').innerHTML = `
+    <div class="email-box">
+      <div class="email-field"><label>To</label><input type="text" placeholder="building-tech@site.edu" id="e-to"></div>
+      <div class="email-field"><label>Subject</label><input type="text" id="e-subject" value="${subject.replace(/"/g,'&quot;')}"></div>
+      <div class="email-field"><label>Body (editable)</label><textarea id="e-body">${body}</textarea></div>
+      <div class="btn-row">
+        <button class="btn btn-primary" onclick="copy('e-subject','e-body')">Copy to Clipboard</button>
+        <button class="btn btn-secondary" onclick="openMailto()">Open in Mail App</button>
+      </div>
+    </div>`;
+}
+
+function openMailto() {
+  const s = encodeURIComponent(document.getElementById('e-subject').value);
+  const b = encodeURIComponent(document.getElementById('e-body').value);
+  window.location.href = `mailto:?subject=${s}&body=${b}`;
+}
+
+// ════════════════════════════════════════════════════════════
+// NOC DIGEST
+// ════════════════════════════════════════════════════════════
+function renderNocDigest() {
+  const { clients, lookbackDays, totalRawEvents, orgName } = REPORT;
+  const sites = [...new Set(clients.map(c => c.site).filter(Boolean))].sort();
+  const subject = `[NOC Digest] Mist NAC Deny Report — ${new Date().toLocaleDateString()} — ${sites.length} site${sites.length>1?'s':''}`;
+  let body = `NOC DIGEST — MIST ACCESS ASSURANCE DENY REPORT\nOrg: ${orgName}\nGenerated: ${new Date().toLocaleString()}\nWindow: Last ${lookbackDays} days\n\n`;
+  body += `ORGANIZATION SUMMARY\n${'═'.repeat(50)}\n`;
+  body += `Total deny events:   ${totalRawEvents.toLocaleString()}\nUnique clients:      ${clients.length}\nSites affected:      ${sites.length}\n`;
+  body += `Cert failures:       ${clients.filter(c=>c.category==='cert').length}\nCred failures:       ${clients.filter(c=>c.category==='cred').length}\nMAC/policy failures: ${clients.filter(c=>c.category==='mac').length}\nSilent failures:     ${clients.filter(c=>c.status==='silent').length}\n\n`;
+
+  sites.forEach(site => {
+    const sc = clients.filter(c => c.site === site);
+    const high = sc.filter(c => c.blastScore === 'high');
+    body += `SITE: ${site}\n${'─'.repeat(40)}\n`;
+    body += `  Clients: ${sc.length} | Cert: ${sc.filter(c=>c.category==='cert').length} | Cred: ${sc.filter(c=>c.category==='cred').length} | MAC: ${sc.filter(c=>c.category==='mac').length}\n`;
+    if (high.length) body += `  HIGH blast radius: ${high.map(c=>c.mac).join(', ')}\n`;
+    body += `  Action: ${sc.length > 0 ? 'Notify building tech. See per-site email.' : 'None required.'}\n\n`;
+  });
+  body += `Full details in the Deny Log Intelligence dashboard.\n`;
+
+  document.getElementById('noc-subject').value = subject;
+  document.getElementById('noc-body').value = body;
+}
+
+// ════════════════════════════════════════════════════════════
+// TABS + UTILS
+// ════════════════════════════════════════════════════════════
+function switchTab(name) {
+  const names = ['dashboard','reasons','timeline','notifications','help'];
+  document.querySelectorAll('.tab').forEach((t, i) => t.classList.toggle('active', names[i] === name));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === `tab-${name}`));
+}
+
+function copy(subjectId, bodyId) {
+  const s = document.getElementById(subjectId)?.value || '';
+  const b = document.getElementById(bodyId)?.value || '';
+  navigator.clipboard.writeText(`Subject: ${s}\n\n${b}`)
+    .then(() => alert('Copied to clipboard!'))
+    .catch(() => alert('Copy failed — please select and copy manually.'));
+}
+
+function fmtTs(ts) {
+  if (!ts) return '—';
+  return new Date(ts * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function fmtDate(ts) {
+  if (!ts) return '—';
+  return new Date(ts * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+</script>
+</body>
+</html>
