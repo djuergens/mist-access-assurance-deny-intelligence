@@ -1,6 +1,8 @@
 # Mist Access Assurance — Deny Log Intelligence
 
-A browser-based dashboard that transforms raw RADIUS deny logs from [Mist Access Assurance](https://www.juniper.net/us/en/products/cloud-services/mist-ai.html) into actionable, client-centric intelligence. Instead of scanning hundreds of identical event rows, you get **one record per device** — showing exactly why it is failing, how long it has been failing, and whether the issue is isolated or systemic.
+A Python report generator that transforms raw RADIUS deny logs from [Mist Access Assurance](https://www.juniper.net/us/en/products/cloud-services/mist-ai.html) into actionable, client-centric intelligence. Run one command, enter your API token, and receive a self-contained **interactive HTML dashboard** and a **multi-sheet Excel workbook** — both opened automatically when the script finishes.
+
+Instead of scanning hundreds of identical event rows, you get **one record per device** — showing exactly why it is failing, how long it has been failing, and whether the issue is isolated or systemic.
 
 ---
 
@@ -20,39 +22,45 @@ Mist Access Assurance generates one RADIUS deny event per authentication attempt
 
 ## The Solution
 
-A client-centric deny log intelligence layer on top of the Mist API that:
+A Python script that pulls from the Mist API and produces two output files:
 
-- Aggregates a rolling **7-day window** of RADIUS deny events into **one record per client** (not one row per event)
-- Automatically **categorizes failures**: Cert/TLS issue · Wrong credentials · MAC auth / policy failure
-- Detects **silent failures** — clients that failed and stopped retrying — using business-hour-aware logic so Friday failures are not missed over the weekend
-- Scores each client by **blast radius** — how many devices share the same deny reason — to surface systemic issues immediately
-- Generates **pre-written notification emails** to building tech teams (per site) and a NOC digest (all sites), with category-specific remediation steps
+- **HTML report** — fully interactive dashboard (filters, tabs, email composer, help) that opens directly in any browser. No web server required. Can be emailed to a colleague.
+- **Excel workbook** — four-sheet workbook for IT teams who prefer spreadsheets.
+
+Both files are self-contained and work completely offline after generation.
 
 ---
 
 ## Quick Start
 
-### Requirements
+### 1. Install dependencies (one time only)
 
-- A modern web browser (Chrome, Edge, Firefox, or Safari)
-- A Mist API token with **org-level read access**
-- Python 3 (used only to serve the file locally — no other dependencies)
+```bash
+pip install -r requirements.txt
+```
 
-### Mac
+Requires Python 3.8 or later. Dependencies: `requests`, `openpyxl`.
 
-1. Download or clone this repository
-2. Double-click **`start_report.command`**
-   - If macOS shows a security warning, right-click the file → **Open** → **Open**
-3. Your browser opens automatically
-4. Paste your Mist API token and click **Connect & Generate Report**
+### 2. Run the script
 
-### Windows
+```bash
+python3 deny_report.py
+```
 
-1. Download or clone this repository
-2. Double-click **`start_report.bat`**
-3. Paste your Mist API token and click **Connect & Generate Report**
+### 3. Answer three prompts
 
-> The launcher scripts start a lightweight local Python web server so the browser can reach the Mist API. Keep the terminal or command window open while using the tool. Close it when you are done.
+```
+Mist API Token (input hidden): ••••••••••••••••••••
+Cloud Region:
+  1. Global          (api.mist.com)
+  2. Europe          (api.eu.mist.com)
+  3. APAC            (api.gc1.mist.com)
+  ...
+Select region [1]: 1
+Lookback window in days [7]: 7
+```
+
+The script authenticates, fetches events, aggregates data, writes both output files, and opens them automatically.
 
 ---
 
@@ -63,13 +71,46 @@ A client-centric deny log intelligence layer on top of the Mist API that:
 3. Scroll to **API Token** → **Create Token**
 4. Give it a name (e.g. `Deny Log Report`) and click **Generate**
 5. **Copy the token immediately** — it is only shown once
-6. Paste it into the dashboard when prompted
+6. Paste it at the prompt when running the script
 
 **Required access:** Org-level read access to NAC client events and sites. An org admin token works. Site-level tokens will only show data for a single site and will miss cross-site patterns.
 
+> **Security note:** The token is entered via a hidden prompt (`getpass`) and is never written to disk. It exists in memory only for the duration of the script run.
+
 ---
 
-## Dashboard
+## Output Files
+
+Both files are timestamped (e.g. `deny_report_20260410_1020.html`) and saved in the directory where you run the script.
+
+### HTML Report
+
+An interactive single-file dashboard with five tabs:
+
+**Dashboard** — Sortable, filterable client table. Filter by site, status, category, or deny reason. Free-text search across MAC, username, site, and error text. Click a category card to filter to that failure type.
+
+**Deny Reasons** — Every unique RADIUS error message, ranked by how many clients are hitting it. Click any row to jump to the Dashboard filtered to exactly those clients. Fastest path from "something is wrong" to "here is who to fix first."
+
+**7-Day Timeline** — One row per client, colored by failure category, one block per day. Spot sudden onset (all clients start the same day), persistent failures (full 7-day bar), and silent failures (activity only on early days).
+
+**Notification Center** — Pre-written emails for every site:
+- **Per-site email** — affected MACs, deny reasons, and remediation steps, ready to send to the building tech team. Editable before sending.
+- **NOC Digest** — single cross-site summary for the network operations team.
+
+**Help** — In-app reference for every field, status, and score, plus FAQ.
+
+### Excel Workbook
+
+| Sheet | Contents |
+|---|---|
+| Client Summary | One row per MAC — status, category, blast radius, attempts, dates, primary deny reason. Color-coded cells. |
+| Deny Reasons | Each unique deny reason text with client count, total events, category, and affected MACs |
+| Daily Timeline | Events per client per day — colored cells matching the category (cert / cred / mac) |
+| Remediation Guide | Step-by-step fix instructions for each failure category |
+
+---
+
+## Dashboard Reference
 
 ### Metric Cards
 
@@ -99,43 +140,13 @@ A client-centric deny log intelligence layer on top of the Mist API that:
 
 ### Blast Radius
 
-Blast radius is calculated **across clients**, not per-client. It measures how many devices share the exact same primary deny reason. A high blast radius is the signal that a single root cause — a misconfigured cert rollout, an MDM deployment that missed a fleet, or a policy change — is affecting many users at once.
+Blast radius is calculated **across clients**, not per-client. It measures how many devices share the exact same primary deny reason. A high blast radius signals that a single root cause — a misconfigured cert rollout, an MDM deployment that missed a fleet, or a policy change — is affecting many users at once.
 
 | Score | Threshold | Interpretation |
 |---|---|---|
 | 🔴 HIGH | 5+ clients share the same deny reason | Systemic — likely a policy change, cert rollout, or MDM deployment affecting a device fleet |
-| 🟡 MED | 3–4 clients share the same deny reason | Small group pattern — shared policy, same device model, or same SSID configuration issue |
+| 🟡 MED | 3–4 clients share the same deny reason | Small group pattern — shared policy, same device model, or SSID configuration issue |
 | 🟢 LOW | 1–2 clients share this deny reason | Isolated — specific to that device or user account |
-
----
-
-## Tabs
-
-### Dashboard
-Sortable, filterable client table. Filter by site, status, deny reason, or free-text search across MAC, username, site, and error text. Click a category card to filter to that failure type.
-
-### Deny Reasons
-Every unique RADIUS error message, ranked by how many clients are hitting it. Click any row to jump to the Dashboard filtered to exactly those clients. This is the fastest path from "something is wrong" to "here is who to fix first."
-
-### 7-Day Timeline
-One row per client, colored by failure category, one block per day. Makes it easy to spot sudden onset (all clients start the same day — likely a policy change), persistent failures (full 7-day bar), and silent failures (activity only on early days).
-
-### Notification Center
-Pre-written emails for every site with affected clients:
-- **Per-site email** — affected MACs, deny reasons, and step-by-step remediation, ready to send to the building tech team. Editable before sending.
-- **NOC Digest** — single cross-site summary for the network operations team.
-
-### Help
-In-app reference: definitions for every field, status, and score, plus a FAQ covering the most common questions.
-
----
-
-## Configuration Options
-
-| Setting | Options | Notes |
-|---|---|---|
-| Cloud Region | Global / Europe / APAC | Must match your Mist dashboard URL. Most customers use Global. |
-| Lookback Window | 3 / 7 / 14 days | 7 days recommended. Catches the Friday problem while keeping the dataset manageable. Event retention varies by Mist org tier. |
 
 ---
 
@@ -164,7 +175,7 @@ All API calls use `Authorization: Token <token>`. All operations are **read-only
 
 ### Silent Failure Detection
 
-The silent threshold is not a fixed wall-clock duration. Instead, the tool counts only business hours (Monday–Friday, 7am–7pm) elapsed since the client's last deny event. Weekend hours and overnight hours do not count.
+The silent threshold is not a fixed wall-clock duration. The tool counts only business hours (Monday–Friday, 7am–7pm) elapsed since the client's last deny event. Weekend hours and overnight hours do not count.
 
 A client that fails Friday at 5pm will not be marked silent until **Monday at 3pm** (8 business hours later) — giving a full business day for the user to return and attempt reconnection before it is considered silently broken.
 
@@ -173,9 +184,10 @@ A client that fails Friday at 5pm will not be marked silent until **Monday at 3p
 ## Security
 
 - **Read-only:** This tool makes no write calls to the Mist API
-- **No storage:** API tokens are held only in browser session memory and are never written to disk, logged, or transmitted to any third party
-- **No server:** All aggregation and analysis runs locally in the browser — no backend, no cloud service
-- **Session-scoped:** Closing the browser tab clears the token
+- **Token never stored:** The API token is entered via a hidden prompt and lives in memory only for the duration of the script. It is never written to disk, logged, or transmitted anywhere except the Mist API.
+- **No backend:** All data is fetched directly from Mist to your local machine. Nothing passes through any intermediate server.
+- **Local processing:** All aggregation and analysis runs on your machine. The generated HTML and Excel files contain no live connections — they are static snapshots.
+- **Shareable output:** The HTML report can be emailed freely — it contains no credentials, no tokens, and no live API connections.
 
 ---
 
@@ -183,9 +195,9 @@ A client that fails Friday at 5pm will not be marked silent until **Monday at 3p
 
 | File | Description |
 |---|---|
-| `deny_dashboard.html` | Main tool — the complete dashboard as a single self-contained HTML file |
-| `start_report.command` | Mac launcher — double-click to start the local server and open the browser |
-| `start_report.bat` | Windows launcher — double-click to start the local server and open the browser |
+| `deny_report.py` | Main script — run with `python3 deny_report.py` |
+| `requirements.txt` | Python dependencies (`requests`, `openpyxl`) |
+| `deny_dashboard.html` | Alternative: live browser tool that calls the Mist API directly (requires a local web server for CORS) |
 | `LICENSE` | MIT License |
 | `README.md` | This file |
 
