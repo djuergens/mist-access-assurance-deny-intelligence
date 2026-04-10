@@ -254,17 +254,38 @@ def _headers(token):
 
 
 def fetch_org_info(token, base_url):
-    """Call /api/v1/self to get org_id and org_name."""
+    """Call /api/v1/self, list all orgs, and let the user pick one."""
     resp = requests.get(f"{base_url}/api/v1/self", headers=_headers(token), timeout=30)
     resp.raise_for_status()
     data  = resp.json()
     privs = data.get("privileges", [])
-    org   = next((p for p in privs if p.get("scope") == "org"), None)
-    if not org:
+    orgs  = [p for p in privs if p.get("scope") == "org"]
+
+    if not orgs:
         print("\n  ERROR: No org-level access found for this token.")
         print("  An org-scoped admin token is required.")
         sys.exit(1)
-    return {"org_id": org["org_id"], "org_name": org.get("name", org["org_id"])}
+
+    # Single org — skip the prompt
+    if len(orgs) == 1:
+        org = orgs[0]
+        return {"org_id": org["org_id"], "org_name": org.get("name", org["org_id"])}
+
+    # Multiple orgs — show a numbered list
+    print("\nOrganizations available with this token:")
+    for i, o in enumerate(orgs, 1):
+        print(f"  {i}. {o.get('name', o['org_id'])}  ({o['org_id']})")
+
+    while True:
+        choice = input(f"Select org [1–{len(orgs)}]: ").strip()
+        try:
+            idx = int(choice) - 1
+            if 0 <= idx < len(orgs):
+                org = orgs[idx]
+                return {"org_id": org["org_id"], "org_name": org.get("name", org["org_id"])}
+        except ValueError:
+            pass
+        print(f"  Please enter a number between 1 and {len(orgs)}.")
 
 
 def fetch_sites(token, org_id, base_url):
