@@ -309,32 +309,52 @@ def fetch_sites(token, org_id, base_url):
 
 
 def fetch_events(token, org_id, lookback_days, base_url):
-    """Paginate through all NAC client events for the lookback window."""
+    """
+    Paginate through NAC client events for the lookback window.
+    Fetches deny types and permits separately so the API only returns
+    relevant events — avoids downloading the full NAC event stream.
+    """
+    start_ts = int(datetime.now(tz=timezone.utc).timestamp()) - (lookback_days * 86400)
+    url_base = f"{base_url}/api/v1/orgs/{org_id}/nac_clients/events/search"
+
+    # Fetch deny types + permit in two focused passes rather than one
+    # unfiltered pass. This can reduce total pages dramatically in large orgs.
+    fetch_types = [
+        ("NAC_CLIENT_DENY",                    "deny events"),
+        ("NAC_SERVER_CERT_VALIDATION_FAILURE",  "cert failures"),
+        ("NAC_CLIENT_PERMIT",                   "permit events"),
+    ]
+
     all_events = []
-    start_ts   = int(datetime.now(tz=timezone.utc).timestamp()) - (lookback_days * 86400)
-    url        = f"{base_url}/api/v1/orgs/{org_id}/nac_clients/events/search"
-    params     = {"limit": 1000, "start": start_ts}
-    page       = 0
 
-    while True:
-        page += 1
-        resp = requests.get(url, headers=_headers(token), params=params, timeout=60)
-        resp.raise_for_status()
-        data    = resp.json()
-        results = data.get("results", [])
-        all_events.extend(results)
+    for event_type, label in fetch_types:
+        type_events = []
+        url    = url_base
+        params = {"limit": 1000, "start": start_ts, "type": event_type}
+        page   = 0
 
-        total = data.get("total") or data.get("estimated_total") or len(all_events)
-        pct   = min(100, round(len(all_events) / max(total, 1) * 100))
-        print(f"  Page {page}: {len(all_events):,} / ~{total:,} events ({pct}%)", end="\r")
+        while True:
+            page += 1
+            resp = requests.get(url, headers=_headers(token), params=params, timeout=60)
+            resp.raise_for_status()
+            data    = resp.json()
+            results = data.get("results", [])
+            type_events.extend(results)
 
-        if not data.get("next"):
-            break
-        nxt    = data["next"]
-        params = {}
-        url    = f"{base_url}{nxt}" if nxt.startswith("/") else nxt
+            total = data.get("total") or data.get("estimated_total") or len(type_events)
+            pct   = min(100, round(len(type_events) / max(total, 1) * 100))
+            print(f"  {label}: page {page} — {len(type_events):,} / ~{total:,} ({pct}%)", end="\r")
 
-    print(f"  Fetched {len(all_events):,} events total.           ")
+            if not data.get("next"):
+                break
+            nxt    = data["next"]
+            params = {}
+            url    = f"{base_url}{nxt}" if nxt.startswith("/") else nxt
+
+        print(f"  {label}: {len(type_events):,} fetched.                          ")
+        all_events.extend(type_events)
+
+    print(f"  Total events fetched: {len(all_events):,}           ")
     return all_events
 
 
