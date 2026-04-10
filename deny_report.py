@@ -145,6 +145,15 @@ def aggregate_events(events, site_map, lookback_days=7):
         if ts < window_start_ts:
             continue
 
+        # Skip Marvis Mini synthetic test authentications — these are
+        # infrastructure health checks on the management plane (port_type=vty),
+        # not real client failures. They have no MAC address and always hit
+        # the implicit deny by design. Including them pollutes the report.
+        if event.get("port_type") == "vty":
+            continue
+        if not event.get("mac") and event.get("auth_type") == "device-auth":
+            continue
+
         mac    = event.get("mac") or event.get("username") or "unknown"
         day_key = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
         c = clients[mac]
