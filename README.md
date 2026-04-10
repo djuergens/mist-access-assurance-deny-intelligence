@@ -33,34 +33,97 @@ Both files are self-contained and work completely offline after generation.
 
 ## Quick Start
 
-### 1. Install dependencies (one time only)
+### Requirements
 
+- Python 3.8 or later — verify with `python3 --version`
+- A Mist API token with **org-level read access** (instructions below)
+- Terminal / Command Prompt
+
+---
+
+### Step 1 — Get the files
+
+**Option A: Git clone (recommended — makes future updates easy)**
+
+```bash
+git clone https://github.com/djuergens/mist-access-assurance-deny-intelligence.git
+cd mist-access-assurance-deny-intelligence
+```
+
+**Option B: Download ZIP**
+
+Click the green **Code** button on this page → **Download ZIP** → unzip it → open Terminal and `cd` into the folder.
+
+---
+
+### Step 2 — Install dependencies (one time only)
+
+**Mac / Linux:**
+```bash
+pip3 install -r requirements.txt
+```
+
+**Windows:**
 ```bash
 pip install -r requirements.txt
 ```
 
-Requires Python 3.8 or later. Dependencies: `requests`, `openpyxl`.
+> If `pip3` is not found, try: `python3 -m pip install -r requirements.txt`
 
-### 2. Run the script
+Dependencies: `requests`, `openpyxl`. Nothing else required.
 
+---
+
+### Step 3 — Run the script
+
+**Mac / Linux:**
 ```bash
 python3 deny_report.py
 ```
 
-### 3. Answer three prompts
+**Windows:**
+```bash
+python deny_report.py
+```
+
+---
+
+### Step 4 — Answer the prompts
 
 ```
 Mist API Token (input hidden): ••••••••••••••••••••
+
 Cloud Region:
   1. Global          (api.mist.com)
   2. Europe          (api.eu.mist.com)
   3. APAC            (api.gc1.mist.com)
   ...
 Select region [1]: 1
+
+Organizations available with this token:
+  1. Acme Corp   (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+  2. Lab Org     (yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy)
+Select org [1–2]: 1
+
 Lookback window in days [7]: 7
 ```
 
 The script authenticates, fetches events, aggregates data, writes both output files, and opens them automatically.
+
+---
+
+### Updating to the latest version
+
+If you cloned with git:
+```bash
+cd mist-access-assurance-deny-intelligence
+git pull
+```
+
+If you downloaded manually, re-download `deny_report.py`:
+```bash
+curl -O https://raw.githubusercontent.com/djuergens/mist-access-assurance-deny-intelligence/main/deny_report.py
+```
 
 ---
 
