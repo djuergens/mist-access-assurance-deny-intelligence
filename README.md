@@ -106,14 +106,11 @@ Organizations available with this token:
 Select org [1–2]: 1
 
 Lookback window in days [7]: 7
-
-Managed device CSV path (optional, press Enter to skip): /path/to/assets.csv
-  ✓  247 managed devices loaded from 'MAC Address' column
 ```
 
 The script authenticates, fetches events, aggregates data, writes both output files, and opens them automatically.
 
-The CSV prompt is optional — press **Enter** to skip it. When a CSV is provided, every failing client is tagged as **Managed**, **Unmanaged**, or **Unknown**, and the report surfaces a dedicated "Managed Assets Failing" metric card so IT teams can immediately triage company-owned devices.
+To tag clients as managed or unmanaged, use the **📋 Import Asset List** button in the top-right corner of the HTML report — no re-run needed. See [Managed Device CSV](#managed-device-csv-optional) below.
 
 ---
 
@@ -210,7 +207,7 @@ Both files are timestamped (e.g. `deny_report_20260410_1020.html`) and saved in 
 
 An interactive single-file dashboard with five tabs:
 
-**Dashboard** — Sortable, filterable client table. Filter by site, status, category, deny reason, or device type (managed/unmanaged). Free-text search across MAC, username, site, error text, device name, owner, and department. Click a category card to filter to that failure type. When a managed device CSV is loaded, a **Managed Assets Failing** metric card appears and an **Asset** column shows each client's managed/unmanaged status with device name, owner, and department inline.
+**Dashboard** — Sortable, filterable client table. Filter by site, status, category, deny reason, or device type (managed/unmanaged). Free-text search across MAC, username, site, error text, device name, owner, and department. Click a category card to filter to that failure type. Use the **📋 Import Asset List** button (top-right) to load a managed device CSV — no re-run needed. The report updates live: a **Managed Assets Failing** metric card appears, an **Asset** column shows managed/unmanaged status with device name, owner, and department inline, and a **Device Type** filter dropdown is enabled. Drag-and-drop a CSV onto the page also works. A **✕ Remove** link clears the import.
 
 **Deny Reasons** — Every unique RADIUS error message, ranked by how many clients are hitting it. Click any row to jump to the Dashboard filtered to exactly those clients. Fastest path from "something is wrong" to "here is who to fix first."
 
