@@ -106,9 +106,14 @@ Organizations available with this token:
 Select org [1–2]: 1
 
 Lookback window in days [7]: 7
+
+Managed device CSV path (optional, press Enter to skip): /path/to/assets.csv
+  ✓  247 managed devices loaded from 'MAC Address' column
 ```
 
 The script authenticates, fetches events, aggregates data, writes both output files, and opens them automatically.
+
+The CSV prompt is optional — press **Enter** to skip it. When a CSV is provided, every failing client is tagged as **Managed**, **Unmanaged**, or **Unknown**, and the report surfaces a dedicated "Managed Assets Failing" metric card so IT teams can immediately triage company-owned devices.
 
 ---
 
@@ -124,6 +129,61 @@ If you downloaded manually, re-download `deny_report.py`:
 ```bash
 curl -O https://raw.githubusercontent.com/djuergens/mist-access-assurance-deny-intelligence/main/deny_report.py
 ```
+
+---
+
+## Managed Device CSV (Optional)
+
+Import a CSV of known company-owned devices to tag every failing client as **Managed**, **Unmanaged**, or **Unknown**. This lets IT admins immediately focus on company assets and deprioritize BYOD and guest devices.
+
+### What it unlocks
+
+- **Managed Assets Failing** metric card in the HTML dashboard (only shown when a CSV is loaded)
+- **Asset** column in the client table — green badge for managed devices, gray for unmanaged
+- **Device Type filter** dropdown — filter the table to show only managed or only unmanaged clients
+- **Managed Asset Failures** sheet in the Excel workbook — managed clients sorted to the top, with device name, owner, and department
+- Free-text search across device name, owner, and department
+
+### CSV format
+
+The script auto-detects the MAC address column by scanning header names for common keywords (`mac`, `address`, `hardware`, `ethernet`, etc.). No specific column name is required.
+
+| Column | Required | Auto-detected keywords | Example values |
+|---|---|---|---|
+| MAC address | **Yes** | mac, address, hardware, ethernet, wifi, bssid | `a4:c3:f0:12:34:56`, `A4C3F0123456`, `a4-c3-f0-12-34-56` |
+| Device name | No | name, hostname, computer, device, asset | `LAPTOP-JSMITH` |
+| Assigned user | No | user, owner, assigned, person, email | `John Smith` |
+| Department | No | dept, department, group, division, team, ou | `Finance` |
+
+MAC addresses can be in any common format — colons, dashes, dots, no separator, uppercase or lowercase. All formats are normalized automatically.
+
+### Example CSV
+
+See [`assets_example.csv`](assets_example.csv) for a ready-to-use template:
+
+```csv
+MAC Address,Device Name,Assigned User,Department
+a4:c3:f0:12:34:56,LAPTOP-JSMITH,John Smith,Finance
+B8:27:EB:AB:CD:EF,DESKTOP-KLEE,Karen Lee,IT
+d4:6d:6d:aa:bb:cc,IPAD-CONF-ROOM-1,,Facilities
+```
+
+### Exporting from your MDM
+
+**Jamf Pro**
+1. Computers → Search Inventory → export all
+2. Include columns: MAC Address, Computer Name, Username, Department
+
+**Microsoft Intune**
+1. Devices → All devices → Export (CSV)
+2. Relevant columns: MAC address (Wi-Fi), Device name, Primary user UPN, Department (from Azure AD)
+
+**Google Admin / Chrome OS**
+1. Devices → Chrome devices → Download device list
+2. Include: MAC address, Asset ID, User, Organizational unit
+
+**Manual / Spreadsheet**
+Any CSV with a column containing MAC addresses works. Extra columns are ignored. If the MAC column cannot be auto-detected, the script will show the available column names and ask you to type the correct one.
 
 ---
 
@@ -150,7 +210,7 @@ Both files are timestamped (e.g. `deny_report_20260410_1020.html`) and saved in 
 
 An interactive single-file dashboard with five tabs:
 
-**Dashboard** — Sortable, filterable client table. Filter by site, status, category, or deny reason. Free-text search across MAC, username, site, and error text. Click a category card to filter to that failure type.
+**Dashboard** — Sortable, filterable client table. Filter by site, status, category, deny reason, or device type (managed/unmanaged). Free-text search across MAC, username, site, error text, device name, owner, and department. Click a category card to filter to that failure type. When a managed device CSV is loaded, a **Managed Assets Failing** metric card appears and an **Asset** column shows each client's managed/unmanaged status with device name, owner, and department inline.
 
 **Deny Reasons** — Every unique RADIUS error message, ranked by how many clients are hitting it. Click any row to jump to the Dashboard filtered to exactly those clients. Fastest path from "something is wrong" to "here is who to fix first."
 
@@ -260,6 +320,7 @@ A client that fails Friday at 5pm will not be marked silent until **Monday at 3p
 |---|---|
 | `deny_report.py` | Main script — run with `python3 deny_report.py` |
 | `requirements.txt` | Python dependencies (`requests`, `openpyxl`) |
+| `assets_example.csv` | Example managed device CSV — use as a template for your MDM export |
 | `deny_dashboard.html` | Alternative: live browser tool that calls the Mist API directly (requires a local web server for CORS) |
 | `LICENSE` | MIT License |
 | `README.md` | This file |

@@ -1,0 +1,10 @@
+MAC Address,Device Name,Assigned User,Department
+a4:c3:f0:12:34:56,LAPTOP-JSMITH,John Smith,Finance
+B8:27:EB:AB:CD:EF,DESKTOP-KLEE,Karen Lee,IT
+d4:6d:6d:aa:bb:cc,IPAD-CONF-ROOM-1,,Facilities
+00:50:56:11:22:33,VM-HELPDESK-01,Help Desk,IT
+3c:7c:3f:de:ad:be,MACBOOK-MGARCIA,Maria Garcia,Marketing
+a4:c3:f0:99:88:77,SURFACE-RPATEL,Raj Patel,Engineering
+b8:e8:56:44:55:66,CHROMEBOOK-EDU-042,,Education
+00:0c:29:77:88:99,WIN11-ACCOUNTING,Accounting Shared,Finance
+dc:a6:32:11:22:33,RASPBERRYPI-KIOSK,,Facilities

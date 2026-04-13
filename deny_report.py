@@ -11,6 +11,8 @@ Usage:
 
 import sys
 import os
+import re
+import csv
 import json
 import getpass
 import subprocess
@@ -117,10 +119,90 @@ def business_hours_elapsed(from_ts, to_ts):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Asset CSV — managed device matching
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Common column name keywords used by MDM/asset systems
+_MAC_KEYWORDS  = ["mac", "macaddress", "mac_address", "hardware", "hwaddr",
+                  "ethernetaddress", "wifi", "wlan", "address"]
+_NAME_KEYWORDS = ["name", "device", "hostname", "computername", "computer",
+                  "devicename", "asset"]
+_OWNER_KEYWORDS = ["owner", "user", "assigneduser", "assignedto", "username",
+                   "email", "upn"]
+_DEPT_KEYWORDS  = ["department", "dept", "group", "division", "ou", "org"]
+
+
+def normalize_mac(raw):
+    """Strip separators, lowercase — 'AA:BB:CC:DD:EE:FF' → 'aabbccddeeff'."""
+    if not raw:
+        return ""
+    return re.sub(r"[:\-.\s]", "", raw).lower()
+
+
+def _best_column(headers, keywords):
+    """Return the first header whose lowercase name contains any keyword."""
+    for h in headers:
+        hl = h.lower().replace(" ", "").replace("_", "")
+        for kw in keywords:
+            if kw in hl:
+                return h
+    return None
+
+
+def load_asset_csv(path):
+    """
+    Load a CSV of known managed device MAC addresses.
+
+    Auto-detects the MAC address column by scanning header names for common
+    keywords used by Jamf, Intune, and other MDM/asset systems.
+    Optionally reads device name, owner, and department columns.
+
+    Returns:
+        asset_map  — dict of {normalized_mac: {name, owner, dept, raw_row}}
+        mac_col    — name of the column used for MAC matching
+        row_count  — total rows parsed
+    """
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader  = csv.DictReader(f)
+        headers = reader.fieldnames or []
+        if not headers:
+            return {}, None, 0
+
+        mac_col   = _best_column(headers, _MAC_KEYWORDS)
+        name_col  = _best_column(headers, _NAME_KEYWORDS)
+        owner_col = _best_column(headers, _OWNER_KEYWORDS)
+        dept_col  = _best_column(headers, _DEPT_KEYWORDS)
+
+        if not mac_col:
+            print(f"\n  Could not auto-detect MAC column.")
+            print(f"  Columns found: {', '.join(headers)}")
+            mac_col = input("  Enter the column name that contains MAC addresses: ").strip()
+            if mac_col not in headers:
+                print(f"  Column '{mac_col}' not found. Skipping asset matching.")
+                return {}, None, 0
+
+        asset_map = {}
+        row_count = 0
+        for row in reader:
+            raw_mac = row.get(mac_col, "").strip()
+            norm    = normalize_mac(raw_mac)
+            if not norm or len(norm) != 12:
+                continue
+            row_count += 1
+            asset_map[norm] = {
+                "name":  row.get(name_col,  "").strip() if name_col  else "",
+                "owner": row.get(owner_col, "").strip() if owner_col else "",
+                "dept":  row.get(dept_col,  "").strip() if dept_col  else "",
+            }
+
+    return asset_map, mac_col, row_count
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Aggregation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def aggregate_events(events, site_map, lookback_days=7):
+def aggregate_events(events, site_map, lookback_days=7, asset_map=None):
     """Collapse raw events to one record per client MAC."""
     now_ts          = datetime.now(tz=timezone.utc).timestamp()
     window_start_ts = now_ts - (lookback_days * 86400)
@@ -199,6 +281,17 @@ def aggregate_events(events, site_map, lookback_days=7):
             status = "silent" if biz_hours >= SILENCE_BIZ_HOURS else "failing"
 
         cat = c["category"] or "mac"
+
+        # Asset matching — tag as managed/unmanaged/unknown
+        if asset_map is None:
+            asset_status = "unknown"   # no CSV loaded
+            asset_info   = {}
+        else:
+            norm         = normalize_mac(mac)
+            info         = asset_map.get(norm)
+            asset_status = "managed"   if info else "unmanaged"
+            asset_info   = info or {}
+
         result.append({
             "mac":          mac,
             "site_id":      c["site_id"],
@@ -219,6 +312,10 @@ def aggregate_events(events, site_map, lookback_days=7):
             "activity":     activity,
             "primaryText":  primary_text,
             "allTexts":     [{"text": t, "count": n} for t, n in all_texts],
+            "assetStatus":  asset_status,
+            "assetName":    asset_info.get("name",  ""),
+            "assetOwner":   asset_info.get("owner", ""),
+            "assetDept":    asset_info.get("dept",  ""),
         })
 
     # Blast radius — how many clients share the same primary deny reason?
@@ -497,6 +594,41 @@ def build_excel(report, path):
         rc.alignment = WRAP
         ws4.row_dimensions[r].height = 60
 
+    # ── Sheet 5: Managed Asset Failures (only if CSV was loaded) ─────────────
+    has_assets = any(c.get("assetStatus") != "unknown" for c in report["clients"])
+    if has_assets:
+        ws5 = wb.create_sheet("Managed Asset Failures")
+        cols5 = [
+            ("Asset Status", 16), ("MAC Address", 18), ("Device Name", 22),
+            ("Owner", 22), ("Department", 20), ("Username", 22), ("Site", 20),
+            ("Category", 22), ("Status", 12), ("Attempts", 14),
+            ("Days Failing", 14), ("Primary Deny Reason", 60),
+        ]
+        style_header_row(ws5, cols5)
+        managed_first = sorted(
+            report["clients"],
+            key=lambda x: (0 if x["assetStatus"] == "managed" else 1, -x["attempts"])
+        )
+        ASSET_COLORS = {"managed": "22C55E", "unmanaged": "6B7280", "unknown": "374151"}
+        for r, c in enumerate(managed_first, 2):
+            ast = ws5.cell(r, 1, c["assetStatus"].upper())
+            color_cell(ast, ASSET_COLORS.get(c["assetStatus"], "888888"), "FFFFFF")
+            ws5.cell(r, 2,  c["mac"]).font = Font(name="Courier New", size=10)
+            ws5.cell(r, 3,  c.get("assetName",  ""))
+            ws5.cell(r, 4,  c.get("assetOwner", ""))
+            ws5.cell(r, 5,  c.get("assetDept",  ""))
+            ws5.cell(r, 6,  c.get("username",   ""))
+            ws5.cell(r, 7,  c.get("site",       ""))
+            cat_c = ws5.cell(r, 8, c["categoryLabel"])
+            color_cell(cat_c, CAT_COLORS.get(c["category"], "888888"), "FFFFFF")
+            sts_c = ws5.cell(r, 9, c["status"])
+            color_cell(sts_c, STS_COLORS.get(c["status"], "888888"), "FFFFFF")
+            ws5.cell(r, 10, c["attempts"])
+            ws5.cell(r, 11, c["daysFailing"])
+            ws5.cell(r, 12, c.get("primaryText", "")).alignment = WRAP
+            ws5.row_dimensions[r].height = 40
+        ws5.auto_filter.ref = f"A1:{get_column_letter(len(cols5))}1"
+
     wb.save(path)
 
 
@@ -528,7 +660,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .print-btn:hover { border-color: var(--accent); color: var(--accent); }
   .main { padding: 24px; max-width: 1400px; margin: 0 auto; }
   .cards-row { display: grid; gap: 16px; margin-bottom: 24px; }
-  .cards-row.metric-cards { grid-template-columns: repeat(5, 1fr); }
+  .cards-row.metric-cards { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
   .cards-row.category-cards { grid-template-columns: repeat(3, 1fr); }
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
   .card-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
@@ -581,7 +713,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .badge-low      { background: rgba(34,197,94,0.15);   color: var(--low);  }
   .badge-failing  { background: rgba(239,68,68,0.15);   color: var(--high); }
   .badge-silent   { background: rgba(99,102,241,0.15);  color: var(--silent); }
-  .badge-resolved { background: rgba(34,197,94,0.15);   color: var(--resolved); }
+  .badge-resolved   { background: rgba(34,197,94,0.15);   color: var(--resolved); }
+  .badge-managed    { background: rgba(34,197,94,0.15);   color: #16a34a; }
+  .badge-unmanaged  { background: rgba(156,163,175,0.15); color: #6b7280; }
+  .badge-unknown    { background: rgba(156,163,175,0.10); color: #9ca3af; }
   .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
   .tab { padding: 8px 16px; cursor: pointer; border-radius: 6px 6px 0 0; font-size: 13px; color: var(--text-muted); border: 1px solid transparent; border-bottom: none; }
   .tab.active { background: var(--surface); border-color: var(--border); color: var(--text); margin-bottom: -1px; }
@@ -642,6 +777,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="card"><div class="card-label">Sites Affected</div><div class="card-value" id="s-sites">—</div><div class="card-sub" id="s-sites-names"></div></div>
     <div class="card"><div class="card-label">Cert Failures</div><div class="card-value cert-color" id="s-cert">—</div><div class="card-sub" id="s-cert-pct"></div></div>
     <div class="card"><div class="card-label">Silent Failures <span id="silent-help" style="cursor:help;color:var(--text-muted)" title="">ⓘ</span></div><div class="card-value" style="color:var(--silent)" id="s-silent">—</div><div class="card-sub">No retry in 8+ business hours</div></div>
+    <div class="card" id="card-managed" style="display:none"><div class="card-label">Managed Assets Failing</div><div class="card-value" style="color:#dc2626" id="s-managed">—</div><div class="card-sub" id="s-managed-sub"></div></div>
   </div>
 
   <div class="cards-row category-cards">
@@ -670,6 +806,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <select id="f-site"   onchange="renderTable()"><option value="">All Sites</option></select>
         <select id="f-status" onchange="renderTable()"><option value="">All Statuses</option><option value="failing">Failing</option><option value="silent">Silent</option><option value="resolved">Resolved</option></select>
         <select id="f-reason" onchange="renderTable()"><option value="">All Deny Reasons</option></select>
+        <select id="f-asset" onchange="renderTable()" style="display:none"><option value="">All Device Types</option><option value="managed">Managed</option><option value="unmanaged">Unmanaged</option></select>
         <span class="clear-btn" onclick="clearFilters()">Clear filters</span>
         <span class="result-count" id="result-count"></span>
       </div>
@@ -686,6 +823,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
             <th onclick="sortBy('attempts')">Attempts</th>
             <th onclick="sortBy('blastScore')" title="Blast radius = how many clients share the same deny reason">Blast ⓘ</th>
             <th onclick="sortBy('status')">Status</th>
+            <th id="th-asset" onclick="sortBy('assetStatus')" style="display:none">Asset</th>
           </tr></thead>
           <tbody id="tbody"></tbody>
         </table>
@@ -819,6 +957,15 @@ function showDashboard() {
   document.getElementById('silent-help').title =
     `Silent = no retry in ${SILENCE_BIZ_HOURS} business hours (Mon–Fri ${BIZ_START}:00–${BIZ_END}:00). Weekend hours excluded.`;
 
+  if (REPORT.hasAssets) {
+    document.getElementById('card-managed').style.display = '';
+    document.getElementById('s-managed').textContent      = REPORT.managedFailing;
+    document.getElementById('s-managed-sub').textContent  =
+      `${REPORT.unmanagedFailing} unmanaged also failing`;
+    document.getElementById('f-asset').style.display  = '';
+    document.getElementById('th-asset').style.display = '';
+  }
+
   ['cert','cred','mac'].forEach(cat =>
     document.getElementById(`cc-${cat}`).textContent = clients.filter(c => c.category === cat).length
   );
@@ -887,6 +1034,17 @@ function renderAlerts() {
     </div>`).join('');
 }
 
+// ── Asset cell helper ─────────────────────────────────────────────────────────
+function assetCell(c) {
+  const s = c.assetStatus || 'unknown';
+  let html = `<span class="badge badge-${s}">${s}</span>`;
+  if (s === 'managed') {
+    const lines = [c.assetName, c.assetOwner, c.assetDept].filter(Boolean);
+    if (lines.length) html += `<br><small style="color:var(--text-muted);font-size:10px">${lines.join(' · ')}</small>`;
+  }
+  return html;
+}
+
 // ── Client table ─────────────────────────────────────────────────────────────
 function getFiltered() {
   let list   = [...REPORT.clients];
@@ -895,15 +1053,17 @@ function getFiltered() {
   const fSite   = document.getElementById('f-site').value;
   const fStatus = document.getElementById('f-status').value;
   const fReason = document.getElementById('f-reason').value;
+  const fAsset  = document.getElementById('f-asset').value;
 
   if (activeCat)  list = list.filter(c => c.category === activeCat);
   if (activeReason) list = list.filter(c => c.allTexts.some(t => t.text === activeReason));
-  if (fCat)    list = list.filter(c => c.category === fCat);
-  if (fSite)   list = list.filter(c => c.site     === fSite);
-  if (fStatus) list = list.filter(c => c.status   === fStatus);
+  if (fCat)    list = list.filter(c => c.category    === fCat);
+  if (fSite)   list = list.filter(c => c.site        === fSite);
+  if (fStatus) list = list.filter(c => c.status      === fStatus);
   if (fReason) list = list.filter(c => c.allTexts.some(t => t.text === fReason));
+  if (fAsset)  list = list.filter(c => c.assetStatus === fAsset);
   if (search)  list = list.filter(c =>
-    [c.mac, c.username, c.site, c.ssid, c.primaryText].some(v => (v||'').toLowerCase().includes(search))
+    [c.mac, c.username, c.site, c.ssid, c.primaryText, c.assetName, c.assetOwner, c.assetDept].some(v => (v||'').toLowerCase().includes(search))
   );
 
   const blastOrd = { high: 3, med: 2, low: 1 };
@@ -933,6 +1093,7 @@ function clearFilters() {
   document.getElementById('f-site').value   = '';
   document.getElementById('f-status').value = '';
   document.getElementById('f-reason').value = '';
+  document.getElementById('f-asset').value  = '';
   activeCat = null; activeReason = null;
   ['cert','cred','mac'].forEach(c => document.getElementById(`cat-${c}`).classList.remove('active-filter'));
   document.querySelectorAll('.reason-row').forEach(r => r.classList.remove('active-reason'));
@@ -963,10 +1124,11 @@ function renderTable() {
         <br><small style="color:var(--text-muted)">${c.blastCount} client${c.blastCount!==1?'s':''}</small>
       </td>
       <td><span class="badge badge-${c.status}">${c.status}</span></td>
+      ${REPORT.hasAssets ? `<td>${assetCell(c)}</td>` : ''}
     </tr>`;
   }).join('');
   document.getElementById('tbody').innerHTML = rows ||
-    '<tr><td colspan="10" style="text-align:center;color:var(--text-muted);padding:32px">No clients match the current filters.</td></tr>';
+    `<tr><td colspan="${REPORT.hasAssets ? 11 : 10}" style="text-align:center;color:var(--text-muted);padding:32px">No clients match the current filters.</td></tr>`;
 }
 
 // ── Deny reasons ─────────────────────────────────────────────────────────────
@@ -1178,6 +1340,24 @@ def main():
         print("Clamping lookback to 7 days.")
         lookback_days = 7
 
+    # ── Managed device CSV (optional) ────────────────────────────────────────
+    asset_map  = None
+    asset_meta = {}
+    csv_prompt = input("\nManaged device CSV path (optional, press Enter to skip): ").strip()
+    if csv_prompt:
+        csv_path = csv_prompt.strip('"').strip("'")   # handle drag-and-drop quoting on macOS
+        try:
+            asset_map, mac_col, row_count = load_asset_csv(csv_path)
+            if asset_map:
+                asset_meta = {"path": csv_path, "macCol": mac_col, "rowCount": row_count}
+                print(f"  ✓  {row_count} managed devices loaded from '{mac_col}' column")
+            else:
+                print("  ⚠  No valid MAC rows found in CSV — proceeding without asset matching.")
+        except FileNotFoundError:
+            print(f"  ⚠  File not found: {csv_path} — proceeding without asset matching.")
+        except Exception as e:
+            print(f"  ⚠  Could not load CSV ({e}) — proceeding without asset matching.")
+
     # ── Authenticate ──────────────────────────────────────────────────────────
     print("\n" + "─" * 40)
     print("Authenticating...")
@@ -1207,22 +1387,28 @@ def main():
 
     # ── Aggregate ─────────────────────────────────────────────────────────────
     print("Aggregating client records...")
-    clients, day_labels, deny_reasons = aggregate_events(events, site_map, lookback_days)
+    clients, day_labels, deny_reasons = aggregate_events(events, site_map, lookback_days, asset_map)
 
     deny_event_count = sum(1 for e in events if e.get("type") in DENY_EVENT_TYPES)
 
     print(f"  ✓  {len(clients)} unique clients · {deny_event_count:,} deny events")
 
     # ── Build report object ────────────────────────────────────────────────────
+    has_assets      = asset_map is not None
+    managed_failing = [c for c in clients if c.get("assetStatus") == "managed"]
     report = {
-        "orgName":       org_name,
-        "orgId":         org_id,
-        "generatedAt":   datetime.now(tz=timezone.utc).timestamp(),
-        "lookbackDays":  lookback_days,
+        "orgName":        org_name,
+        "orgId":          org_id,
+        "generatedAt":    datetime.now(tz=timezone.utc).timestamp(),
+        "lookbackDays":   lookback_days,
         "totalRawEvents": deny_event_count,
-        "clients":       clients,
-        "denyReasons":   deny_reasons,
-        "dayLabels":     day_labels,
+        "clients":        clients,
+        "denyReasons":    deny_reasons,
+        "dayLabels":      day_labels,
+        "hasAssets":      has_assets,
+        "managedFailing": len(managed_failing),
+        "unmanagedFailing": len([c for c in clients if c.get("assetStatus") == "unmanaged"]),
+        "assetMeta":      asset_meta,
     }
 
     # ── Output paths ──────────────────────────────────────────────────────────
@@ -1255,6 +1441,9 @@ def main():
     print(f"     HTML:         {html_path}")
     if xlsx_path:
         print(f"     Excel:        {xlsx_path}")
+    if has_assets:
+        print(f"     Managed failing:   {len(managed_failing)}")
+        print(f"     Unmanaged failing: {report['unmanagedFailing']}")
     print("═" * 55 + "\n")
 
     # ── Open both files ───────────────────────────────────────────────────────
