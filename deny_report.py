@@ -11,8 +11,6 @@ Usage:
 
 import sys
 import os
-import re
-import csv
 import json
 import getpass
 import subprocess
@@ -119,44 +117,20 @@ def business_hours_elapsed(from_ts, to_ts):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Asset CSV — managed device matching
+# (Asset CSV import is handled client-side in the HTML dashboard.
+#  Drag-and-drop or file picker — no re-run needed.)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Common column name keywords used by MDM/asset systems
-_MAC_KEYWORDS  = ["mac", "macaddress", "mac_address", "hardware", "hwaddr",
-                  "ethernetaddress", "wifi", "wlan", "address"]
-_NAME_KEYWORDS = ["name", "device", "hostname", "computername", "computer",
-                  "devicename", "asset"]
-_OWNER_KEYWORDS = ["owner", "user", "assigneduser", "assignedto", "username",
-                   "email", "upn"]
-_DEPT_KEYWORDS  = ["department", "dept", "group", "division", "ou", "org"]
-
-
-def normalize_mac(raw):
-    """Strip separators, lowercase — 'AA:BB:CC:DD:EE:FF' → 'aabbccddeeff'."""
-    if not raw:
-        return ""
-    return re.sub(r"[:\-.\s]", "", raw).lower()
-
-
-def _best_column(headers, keywords):
-    """Return the first header whose lowercase name contains any keyword."""
-    for h in headers:
-        hl = h.lower().replace(" ", "").replace("_", "")
-        for kw in keywords:
-            if kw in hl:
-                return h
-    return None
-
-
+# ─────────────────────────────────────────────────────────────────────────────
+# DEAD CODE MARKER — load_asset_csv kept here for reference only.
+# The function below is never called; asset matching runs in the browser.
+# ─────────────────────────────────────────────────────────────────────────────
 def load_asset_csv(path):
     """
+    UNUSED — asset matching is now handled in the HTML dashboard.
+
     Load a CSV of known managed device MAC addresses.
-
-    Auto-detects the MAC address column by scanning header names for common
-    keywords used by Jamf, Intune, and other MDM/asset systems.
-    Optionally reads device name, owner, and department columns.
-
+    Auto-detects the MAC address column by scanning header names.
     Returns:
         asset_map  — dict of {normalized_mac: {name, owner, dept, raw_row}}
         mac_col    — name of the column used for MAC matching
@@ -202,7 +176,7 @@ def load_asset_csv(path):
 # Aggregation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def aggregate_events(events, site_map, lookback_days=7, asset_map=None):
+def aggregate_events(events, site_map, lookback_days=7):
     """Collapse raw events to one record per client MAC."""
     now_ts          = datetime.now(tz=timezone.utc).timestamp()
     window_start_ts = now_ts - (lookback_days * 86400)
@@ -282,16 +256,6 @@ def aggregate_events(events, site_map, lookback_days=7, asset_map=None):
 
         cat = c["category"] or "mac"
 
-        # Asset matching — tag as managed/unmanaged/unknown
-        if asset_map is None:
-            asset_status = "unknown"   # no CSV loaded
-            asset_info   = {}
-        else:
-            norm         = normalize_mac(mac)
-            info         = asset_map.get(norm)
-            asset_status = "managed"   if info else "unmanaged"
-            asset_info   = info or {}
-
         result.append({
             "mac":          mac,
             "site_id":      c["site_id"],
@@ -312,10 +276,10 @@ def aggregate_events(events, site_map, lookback_days=7, asset_map=None):
             "activity":     activity,
             "primaryText":  primary_text,
             "allTexts":     [{"text": t, "count": n} for t, n in all_texts],
-            "assetStatus":  asset_status,
-            "assetName":    asset_info.get("name",  ""),
-            "assetOwner":   asset_info.get("owner", ""),
-            "assetDept":    asset_info.get("dept",  ""),
+            "assetStatus":  "unknown",
+            "assetName":    "",
+            "assetOwner":   "",
+            "assetDept":    "",
         })
 
     # Blast radius — how many clients share the same primary deny reason?
@@ -594,41 +558,6 @@ def build_excel(report, path):
         rc.alignment = WRAP
         ws4.row_dimensions[r].height = 60
 
-    # ── Sheet 5: Managed Asset Failures (only if CSV was loaded) ─────────────
-    has_assets = any(c.get("assetStatus") != "unknown" for c in report["clients"])
-    if has_assets:
-        ws5 = wb.create_sheet("Managed Asset Failures")
-        cols5 = [
-            ("Asset Status", 16), ("MAC Address", 18), ("Device Name", 22),
-            ("Owner", 22), ("Department", 20), ("Username", 22), ("Site", 20),
-            ("Category", 22), ("Status", 12), ("Attempts", 14),
-            ("Days Failing", 14), ("Primary Deny Reason", 60),
-        ]
-        style_header_row(ws5, cols5)
-        managed_first = sorted(
-            report["clients"],
-            key=lambda x: (0 if x["assetStatus"] == "managed" else 1, -x["attempts"])
-        )
-        ASSET_COLORS = {"managed": "22C55E", "unmanaged": "6B7280", "unknown": "374151"}
-        for r, c in enumerate(managed_first, 2):
-            ast = ws5.cell(r, 1, c["assetStatus"].upper())
-            color_cell(ast, ASSET_COLORS.get(c["assetStatus"], "888888"), "FFFFFF")
-            ws5.cell(r, 2,  c["mac"]).font = Font(name="Courier New", size=10)
-            ws5.cell(r, 3,  c.get("assetName",  ""))
-            ws5.cell(r, 4,  c.get("assetOwner", ""))
-            ws5.cell(r, 5,  c.get("assetDept",  ""))
-            ws5.cell(r, 6,  c.get("username",   ""))
-            ws5.cell(r, 7,  c.get("site",       ""))
-            cat_c = ws5.cell(r, 8, c["categoryLabel"])
-            color_cell(cat_c, CAT_COLORS.get(c["category"], "888888"), "FFFFFF")
-            sts_c = ws5.cell(r, 9, c["status"])
-            color_cell(sts_c, STS_COLORS.get(c["status"], "888888"), "FFFFFF")
-            ws5.cell(r, 10, c["attempts"])
-            ws5.cell(r, 11, c["daysFailing"])
-            ws5.cell(r, 12, c.get("primaryText", "")).alignment = WRAP
-            ws5.row_dimensions[r].height = 40
-        ws5.auto_filter.ref = f"A1:{get_column_letter(len(cols5))}1"
-
     wb.save(path)
 
 
@@ -658,6 +587,19 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .header-right { display: flex; align-items: center; gap: 16px; font-size: 12px; color: var(--text-muted); }
   .print-btn { padding: 5px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface2); color: var(--text); cursor: pointer; font-size: 12px; }
   .print-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .import-btn { padding: 5px 12px; border: 1px solid #16a34a; border-radius: 6px; background: rgba(34,197,94,0.1); color: #4ade80; cursor: pointer; font-size: 12px; }
+  .import-btn:hover { background: rgba(34,197,94,0.2); }
+  .asset-bar { background: rgba(34,197,94,0.08); border-bottom: 1px solid rgba(34,197,94,0.25); padding: 8px 24px; display:flex; align-items:center; gap:12px; font-size:12px; }
+  .asset-bar-icon { font-size:16px; }
+  .asset-bar-text { color: #4ade80; flex:1; }
+  .asset-bar-clear { color: var(--text-muted); cursor:pointer; text-decoration:underline; }
+  .asset-bar-clear:hover { color: var(--text); }
+  .toast { position:fixed; bottom:24px; right:24px; background:#1e293b; border:1px solid var(--border); border-radius:8px; padding:12px 18px; font-size:13px; z-index:9999; opacity:0; transition:opacity 0.2s; pointer-events:none; max-width:380px; }
+  .toast.show { opacity:1; }
+  .toast.toast-ok   { border-color:#16a34a; color:#4ade80; }
+  .toast.toast-err  { border-color:#dc2626; color:#f87171; }
+  .toast.toast-warn { border-color:#d97706; color:#fbbf24; }
+  .drop-zone-active { outline: 2px dashed #4ade80 !important; }
   .main { padding: 24px; max-width: 1400px; margin: 0 auto; }
   .cards-row { display: grid; gap: 16px; margin-bottom: 24px; }
   .cards-row.metric-cards { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
@@ -766,9 +708,20 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   </div>
   <div class="header-right">
     <span>Mist Access Assurance</span>
+    <button class="import-btn" onclick="document.getElementById('csv-file-input').click()">📋 Import Asset List</button>
     <button class="print-btn" onclick="window.print()">🖨 Print / Save PDF</button>
   </div>
 </div>
+
+<input type="file" id="csv-file-input" accept=".csv,.txt" style="display:none" onchange="handleCSVFile(this.files[0])">
+
+<div id="asset-bar" class="asset-bar" style="display:none">
+  <span class="asset-bar-icon">✅</span>
+  <span class="asset-bar-text" id="asset-bar-text"></span>
+  <span class="asset-bar-clear" onclick="clearAssets()">✕ Remove</span>
+</div>
+
+<div id="toast" class="toast"></div>
 
 <div class="main">
   <div class="cards-row metric-cards">
@@ -1279,7 +1232,162 @@ function fmtDate(ts) {
   return new Date(ts * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-window.addEventListener('DOMContentLoaded', showDashboard);
+window.addEventListener('DOMContentLoaded', () => {
+  showDashboard();
+  // Drag-and-drop CSV onto the whole page
+  document.addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('drop-zone-active'); });
+  document.addEventListener('dragleave', e => { if (!e.relatedTarget) document.body.classList.remove('drop-zone-active'); });
+  document.addEventListener('drop', e => {
+    e.preventDefault();
+    document.body.classList.remove('drop-zone-active');
+    const file = [...e.dataTransfer.files].find(f => f.name.match(/\.csv$/i));
+    if (file) handleCSVFile(file);
+    else showToast('Drop a .csv file to import an asset list.', 'warn');
+  });
+});
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+let toastTimer;
+function showToast(msg, type = 'ok') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className   = `toast toast-${type} show`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 4000);
+}
+
+// ── Asset CSV import ──────────────────────────────────────────────────────────
+const _MAC_KW  = ['mac','address','hardware','hwaddr','ethernet','wifi','wireless','wlan','bssid','physical'];
+const _NAME_KW = ['name','hostname','computer','device','asset','label','computername'];
+const _OWN_KW  = ['user','owner','assigned','person','email','upn','login'];
+const _DEPT_KW = ['dept','department','group','division','team','ou','org','unit'];
+
+function normalizeMac(s) {
+  return (s || '').replace(/[:\-.\s]/g, '').toLowerCase();
+}
+
+function bestColIdx(headers, keywords) {
+  const hl = headers.map(h => h.toLowerCase().replace(/[\s_\-]/g, ''));
+  for (const kw of keywords) {
+    const i = hl.findIndex(h => h.includes(kw));
+    if (i >= 0) return i;
+  }
+  return -1;
+}
+
+function parseCSV(text) {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);  // strip BOM
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) return null;
+  function parseLine(line) {
+    const fields = []; let cur = '', inQ = false;
+    for (const ch of line) {
+      if (ch === '"') { inQ = !inQ; continue; }
+      if (ch === ',' && !inQ) { fields.push(cur.trim()); cur = ''; continue; }
+      cur += ch;
+    }
+    fields.push(cur.trim());
+    return fields;
+  }
+  const headers = parseLine(lines[0]);
+  const rows    = lines.slice(1).map(parseLine);
+  return { headers, rows };
+}
+
+function handleCSVFile(file) {
+  if (!file) return;
+  // Reset input so same file can be re-selected
+  document.getElementById('csv-file-input').value = '';
+  const reader = new FileReader();
+  reader.onload = e => processCSVText(e.target.result, file.name);
+  reader.readAsText(file);
+}
+
+function processCSVText(text, filename) {
+  const parsed = parseCSV(text);
+  if (!parsed) { showToast('Could not parse CSV — file appears empty.', 'err'); return; }
+
+  const macIdx  = bestColIdx(parsed.headers, _MAC_KW);
+  if (macIdx < 0) {
+    showToast(`No MAC address column found.\nColumns: ${parsed.headers.join(', ')}`, 'err');
+    return;
+  }
+
+  const nameIdx = bestColIdx(parsed.headers, _NAME_KW);
+  const ownIdx  = bestColIdx(parsed.headers, _OWN_KW);
+  const deptIdx = bestColIdx(parsed.headers, _DEPT_KW);
+
+  const assetMap = {};
+  let loaded = 0;
+  for (const row of parsed.rows) {
+    const norm = normalizeMac(row[macIdx] || '');
+    if (!norm || norm.length !== 12) continue;
+    assetMap[norm] = {
+      name:  nameIdx >= 0 ? (row[nameIdx]  || '') : '',
+      owner: ownIdx  >= 0 ? (row[ownIdx]   || '') : '',
+      dept:  deptIdx >= 0 ? (row[deptIdx]  || '') : '',
+    };
+    loaded++;
+  }
+
+  if (!loaded) { showToast('No valid MAC addresses found in the CSV.', 'err'); return; }
+  applyAssets(assetMap, filename, loaded);
+}
+
+function applyAssets(assetMap, filename, loadedCount) {
+  let managed = 0, unmanaged = 0;
+  REPORT.clients.forEach(c => {
+    const info = assetMap[normalizeMac(c.mac || '')];
+    if (info) {
+      c.assetStatus = 'managed';
+      c.assetName   = info.name;
+      c.assetOwner  = info.owner;
+      c.assetDept   = info.dept;
+      managed++;
+    } else {
+      c.assetStatus = 'unmanaged';
+      c.assetName = c.assetOwner = c.assetDept = '';
+      unmanaged++;
+    }
+  });
+
+  REPORT.hasAssets      = true;
+  REPORT.managedFailing = managed;
+  REPORT.unmanagedFailing = unmanaged;
+
+  // Show asset bar
+  document.getElementById('asset-bar').style.display = '';
+  document.getElementById('asset-bar-text').textContent =
+    `Asset list: ${filename} · ${loadedCount} devices loaded · ${managed} matched (managed) · ${unmanaged} unmatched (unmanaged)`;
+
+  // Show metric card + filter + column
+  document.getElementById('card-managed').style.display = '';
+  document.getElementById('s-managed').textContent      = managed;
+  document.getElementById('s-managed-sub').textContent  = `${unmanaged} unmanaged also failing`;
+  document.getElementById('f-asset').style.display      = '';
+  document.getElementById('th-asset').style.display     = '';
+
+  renderTable();
+  showToast(`✓ Asset list loaded — ${managed} managed devices matched`, 'ok');
+}
+
+function clearAssets() {
+  REPORT.clients.forEach(c => {
+    c.assetStatus = 'unknown';
+    c.assetName = c.assetOwner = c.assetDept = '';
+  });
+  REPORT.hasAssets = false;
+  REPORT.managedFailing = 0;
+  REPORT.unmanagedFailing = 0;
+
+  document.getElementById('asset-bar').style.display  = 'none';
+  document.getElementById('card-managed').style.display = 'none';
+  document.getElementById('f-asset').style.display    = 'none';
+  document.getElementById('f-asset').value            = '';
+  document.getElementById('th-asset').style.display   = 'none';
+  renderTable();
+  showToast('Asset list removed.', 'warn');
+}
 </script>
 </body>
 </html>"""
@@ -1340,24 +1448,6 @@ def main():
         print("Clamping lookback to 7 days.")
         lookback_days = 7
 
-    # ── Managed device CSV (optional) ────────────────────────────────────────
-    asset_map  = None
-    asset_meta = {}
-    csv_prompt = input("\nManaged device CSV path (optional, press Enter to skip): ").strip()
-    if csv_prompt:
-        csv_path = csv_prompt.strip('"').strip("'")   # handle drag-and-drop quoting on macOS
-        try:
-            asset_map, mac_col, row_count = load_asset_csv(csv_path)
-            if asset_map:
-                asset_meta = {"path": csv_path, "macCol": mac_col, "rowCount": row_count}
-                print(f"  ✓  {row_count} managed devices loaded from '{mac_col}' column")
-            else:
-                print("  ⚠  No valid MAC rows found in CSV — proceeding without asset matching.")
-        except FileNotFoundError:
-            print(f"  ⚠  File not found: {csv_path} — proceeding without asset matching.")
-        except Exception as e:
-            print(f"  ⚠  Could not load CSV ({e}) — proceeding without asset matching.")
-
     # ── Authenticate ──────────────────────────────────────────────────────────
     print("\n" + "─" * 40)
     print("Authenticating...")
@@ -1387,15 +1477,13 @@ def main():
 
     # ── Aggregate ─────────────────────────────────────────────────────────────
     print("Aggregating client records...")
-    clients, day_labels, deny_reasons = aggregate_events(events, site_map, lookback_days, asset_map)
+    clients, day_labels, deny_reasons = aggregate_events(events, site_map, lookback_days)
 
     deny_event_count = sum(1 for e in events if e.get("type") in DENY_EVENT_TYPES)
 
     print(f"  ✓  {len(clients)} unique clients · {deny_event_count:,} deny events")
 
     # ── Build report object ────────────────────────────────────────────────────
-    has_assets      = asset_map is not None
-    managed_failing = [c for c in clients if c.get("assetStatus") == "managed"]
     report = {
         "orgName":        org_name,
         "orgId":          org_id,
@@ -1405,10 +1493,9 @@ def main():
         "clients":        clients,
         "denyReasons":    deny_reasons,
         "dayLabels":      day_labels,
-        "hasAssets":      has_assets,
-        "managedFailing": len(managed_failing),
-        "unmanagedFailing": len([c for c in clients if c.get("assetStatus") == "unmanaged"]),
-        "assetMeta":      asset_meta,
+        "hasAssets":      False,
+        "managedFailing": 0,
+        "unmanagedFailing": 0,
     }
 
     # ── Output paths ──────────────────────────────────────────────────────────
@@ -1441,9 +1528,6 @@ def main():
     print(f"     HTML:         {html_path}")
     if xlsx_path:
         print(f"     Excel:        {xlsx_path}")
-    if has_assets:
-        print(f"     Managed failing:   {len(managed_failing)}")
-        print(f"     Unmanaged failing: {report['unmanagedFailing']}")
     print("═" * 55 + "\n")
 
     # ── Open both files ───────────────────────────────────────────────────────
