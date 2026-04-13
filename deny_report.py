@@ -187,6 +187,9 @@ def aggregate_events(events, site_map, lookback_days=7):
         "firstSeen": None, "lastSeen": None, "attempts": 0,
         "_days_active": set(), "_day_counts": defaultdict(int),
         "_text_counts": defaultdict(int),
+        # last-known location fields (updated to most-recent deny event)
+        "_last_ts": 0,
+        "ap": "", "ap_mac": "", "port_id": "", "switch_mac": "",
     })
     permit_macs = set()
 
@@ -228,6 +231,14 @@ def aggregate_events(events, site_map, lookback_days=7):
             c["firstSeen"] = ts
         if c["lastSeen"]  is None or ts > c["lastSeen"]:
             c["lastSeen"]  = ts
+
+        # Keep last-known location from the most-recent deny event
+        if ts > c["_last_ts"]:
+            c["_last_ts"]   = ts
+            c["ap"]         = event.get("ap", "") or event.get("ap_name", "") or ""
+            c["ap_mac"]     = event.get("ap_mac", "") or ""
+            c["port_id"]    = event.get("port_id", "") or event.get("port", "") or ""
+            c["switch_mac"] = event.get("switch_mac", "") or ""
 
         cat = classify_event(event)
         priority = {"cert": 3, "cred": 2, "mac": 1}
@@ -280,6 +291,10 @@ def aggregate_events(events, site_map, lookback_days=7):
             "assetName":    "",
             "assetOwner":   "",
             "assetDept":    "",
+            "ap":           c["ap"],
+            "apMac":        c["ap_mac"],
+            "portId":       c["port_id"],
+            "switchMac":    c["switch_mac"],
         })
 
     # Blast radius — how many clients share the same primary deny reason?
@@ -987,6 +1002,17 @@ function renderAlerts() {
     </div>`).join('');
 }
 
+// ── Last-known location helper ────────────────────────────────────────────────
+function locationLine(c) {
+  const parts = [];
+  if (c.ap)       parts.push(`AP: ${c.ap}`);
+  else if (c.apMac) parts.push(`AP: ${c.apMac}`);
+  if (c.portId)   parts.push(`Port: ${c.portId}`);
+  if (c.switchMac && !c.portId) parts.push(`SW: ${c.switchMac}`);
+  if (!parts.length) return '';
+  return `<br><small style="color:var(--text-muted);font-size:10px" title="Last known location at time of deny">📍 ${parts.join(' · ')}</small>`;
+}
+
 // ── Asset cell helper ─────────────────────────────────────────────────────────
 function assetCell(c) {
   const s = c.assetStatus || 'unknown';
@@ -1016,7 +1042,7 @@ function getFiltered() {
   if (fReason) list = list.filter(c => c.allTexts.some(t => t.text === fReason));
   if (fAsset)  list = list.filter(c => c.assetStatus === fAsset);
   if (search)  list = list.filter(c =>
-    [c.mac, c.username, c.site, c.ssid, c.primaryText, c.assetName, c.assetOwner, c.assetDept].some(v => (v||'').toLowerCase().includes(search))
+    [c.mac, c.username, c.site, c.ssid, c.primaryText, c.assetName, c.assetOwner, c.assetDept, c.ap, c.portId, c.switchMac].some(v => (v||'').toLowerCase().includes(search))
   );
 
   const blastOrd = { high: 3, med: 2, low: 1 };
@@ -1065,7 +1091,7 @@ function renderTable() {
     const reason = short ? `<span title="${tip.replace(/"/g,'&quot;')}" style="cursor:help">${short}</span>${extra}` : '—';
     return `<tr>
       <td class="mac-cell">${label||'—'}</td>
-      <td>${c.site||'—'}${c.ssid?`<br><small style="color:var(--text-muted)">${c.ssid}</small>`:''}</td>
+      <td>${c.site||'—'}${c.ssid?`<br><small style="color:var(--text-muted)">${c.ssid}</small>`:''}${locationLine(c)}</td>
       <td><span class="badge badge-${c.category}">${c.categoryLabel}</span></td>
       <td style="font-size:12px;line-height:1.4">${reason}</td>
       <td>${fmtDate(c.firstSeen)}</td>
@@ -1164,6 +1190,11 @@ function selectSite(site) {
       if (c.username && c.username !== c.mac) body += `  User: ${c.username}`;
       body += `  — ${c.daysFailing} day${c.daysFailing>1?'s':''}, ${c.attempts} attempts (${c.status})\n`;
       if (c.primaryText) body += `    Error: ${c.primaryText}\n`;
+      const loc = [];
+      if (c.ap || c.apMac)  loc.push(`AP: ${c.ap || c.apMac}`);
+      if (c.portId)         loc.push(`Port: ${c.portId}`);
+      if (c.switchMac && !c.portId) loc.push(`Switch: ${c.switchMac}`);
+      if (loc.length)       body += `    Last seen: ${loc.join(' · ')}\n`;
     });
     body += `\nRemediation: ${CATEGORY_REMEDIATION[cat]}\n\n`;
   });
