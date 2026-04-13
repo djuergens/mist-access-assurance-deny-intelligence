@@ -1279,18 +1279,21 @@ function renderTable() {
   const rows = list.map(c => {
     const label = (c.username && c.username !== c.mac)
       ? `${c.mac}<br><small style="color:var(--text-muted)">${c.username}</small>` : c.mac;
-    const rawTip  = c.allTexts.map(t => `${t.text} (x${t.count})`).join('\n');
-    const extra   = c.allTexts.length > 1 ? `<br><small style="color:var(--text-muted)">+${c.allTexts.length-1} more</small>` : '';
+    const rawTip   = c.allTexts.map(t => `${t.text} (x${t.count})`).join('\n');
+    const extra    = c.allTexts.length > 1 ? `<br><small style="color:var(--text-muted)">+${c.allTexts.length-1} more</small>` : '';
     const rawShort = (c.primaryText || '').length > 55 ? c.primaryText.slice(0,52) + '…' : c.primaryText;
     let reason;
-    if (c.diagnosis) {
-      const diagShort = c.diagnosis.length > 58 ? c.diagnosis.slice(0,55) + '…' : c.diagnosis;
-      const fixTip    = (c.specificFix || '').replace(/"/g,'&quot;');
-      reason = `<span title="${fixTip}" style="cursor:help;color:var(--text)">${diagShort}</span>` +
-               (rawShort ? `<br><small style="color:var(--text-muted);font-style:italic" title="${rawTip.replace(/"/g,'&quot;')}">${rawShort}</small>` : '') +
-               extra;
+    if (rawShort) {
+      // Official RADIUS error — always shown as primary line
+      reason = `<span title="${rawTip.replace(/"/g,'&quot;')}" style="cursor:help">${rawShort}</span>${extra}`;
+      if (c.diagnosis) {
+        // Suggested diagnosis + fix shown below as a secondary line
+        const diagShort = c.diagnosis.length > 60 ? c.diagnosis.slice(0,57) + '…' : c.diagnosis;
+        const fixTip    = (c.specificFix || '').replace(/"/g,'&quot;');
+        reason += `<br><small title="${fixTip}" style="color:var(--accent);cursor:help">💡 ${diagShort}</small>`;
+      }
     } else {
-      reason = rawShort ? `<span title="${rawTip.replace(/"/g,'&quot;')}" style="cursor:help">${rawShort}</span>${extra}` : '—';
+      reason = '—';
     }
     return `<tr>
       <td class="mac-cell">${label||'—'}</td>
