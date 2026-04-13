@@ -11,6 +11,7 @@ Usage:
 
 import sys
 import os
+import re
 import json
 import getpass
 import subprocess
@@ -60,6 +61,191 @@ CATEGORY_REMEDIATION = {
         "Check if the SSID or port policy requires a matching rule for this device type."
     ),
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Diagnosis engine — maps raw RADIUS error text → specific root cause + fix
+# Each entry: (regex_pattern, reason_string, fix_string)
+# Evaluated top-to-bottom; first match wins.
+# ─────────────────────────────────────────────────────────────────────────────
+
+DENY_DIAGNOSIS = [
+    # ── Unsupported EAP methods ───────────────────────────────────────────────
+    (
+        r"eap.?peap|peap",
+        "Device configured for EAP-PEAP — not supported by Mist Access Assurance",
+        "Mist Access Assurance uses EAP-TLS (certificate-based) only. The device's "
+        "wireless profile must be changed from PEAP to EAP-TLS. Push an updated Wi-Fi "
+        "profile via MDM that selects EAP-TLS and references the device certificate.",
+    ),
+    (
+        r"eap.?md5",
+        "Device using EAP-MD5 — legacy method not supported by Mist Access Assurance",
+        "EAP-MD5 is a deprecated, insecure method not supported by Mist AA. Update the "
+        "wireless profile to EAP-TLS via MDM and ensure a device certificate is enrolled.",
+    ),
+    (
+        r"eap.?fast",
+        "Device using EAP-FAST — not supported by Mist Access Assurance",
+        "EAP-FAST is not supported. Update the wireless profile to EAP-TLS via MDM.",
+    ),
+    (
+        r"eap.?ttls|eap.?sim|eap.?aka|eap.?gtc|eap.?pwd",
+        "Device using an unsupported EAP method",
+        "Mist Access Assurance requires EAP-TLS. Update the wireless profile to EAP-TLS "
+        "via MDM and ensure a device certificate is enrolled.",
+    ),
+    # ── Certificate / TLS errors ──────────────────────────────────────────────
+    (
+        r"(certificate verify failed|cert.*verify|verify.*cert).*(unknown ca|unable to get local issuer|no trusted|untrusted|ca.*not|issuer.*not)",
+        "Client does not trust the RADIUS server certificate (unknown / untrusted CA)",
+        "The device has not received the Mist org CA certificate. Export it from "
+        "Organization > Access > Certificates and deploy as a Trusted Root via MDM. "
+        "Jamf: Configuration Profiles > Certificate payload. "
+        "Intune: Trusted Certificate profile.",
+    ),
+    (
+        r"certificate.*expir|cert.*expir|expir.*certif",
+        "Client certificate has expired",
+        "The device certificate has passed its validity end date. Issue a new certificate "
+        "from your PKI and push it via MDM. Review MDM certificate renewal policies to "
+        "prevent this recurring.",
+    ),
+    (
+        r"certificate.*not.*yet.*valid|not yet valid",
+        "Client certificate is not yet valid — likely a clock skew issue",
+        "The certificate's NotBefore date is in the future. Verify the device clock is "
+        "synced (NTP). If the clock is correct, the cert was issued with a future start "
+        "date — reissue it.",
+    ),
+    (
+        r"certificate.*revoked|revoked.*cert|ocsp|crl.*fail",
+        "Client certificate has been revoked",
+        "The certificate is on a revocation list (CRL/OCSP). Issue a replacement cert and "
+        "push via MDM. Investigate why it was revoked — device re-enrollment may be needed.",
+    ),
+    (
+        r"no certificate|missing.*cert|cert.*missing|no client cert|empty.*cert",
+        "No client certificate presented — EAP-TLS requires a device certificate",
+        "The device attempted EAP-TLS but sent no certificate. Enroll a certificate via MDM "
+        "(SCEP or PKCS#12 profile) and verify the wireless profile references it as the "
+        "client authentication certificate.",
+    ),
+    (
+        r"certificate.*chain|chain.*cert|intermediate|issuing ca",
+        "Incomplete certificate chain — intermediate CA may be missing",
+        "The client certificate chain is incomplete. The device or RADIUS server is missing "
+        "an intermediate CA certificate. Ensure the full chain (leaf + intermediate + root) "
+        "is included in the MDM certificate payload.",
+    ),
+    (
+        r"tls.*alert|alert.*handshake|handshake.*fail|tls.*error|ssl.*error|tls.*fatal",
+        "TLS handshake failed — certificate or protocol negotiation error",
+        "A TLS-level error prevented authentication. Common causes: "
+        "1) Device does not trust the server cert — deploy Mist CA via MDM. "
+        "2) Cipher suite or TLS version mismatch — check device supplicant settings. "
+        "3) Client cert is malformed or missing the clientAuth Extended Key Usage (EKU).",
+    ),
+    # ── Credential / LDAP / IdP errors ───────────────────────────────────────
+    (
+        r"invalid credentials|invalid password|wrong password|bind.*fail|ldap.*bind",
+        "Username or password rejected by the directory (LDAP/AD)",
+        "The IdP explicitly rejected the credentials. Verify the username and password are "
+        "correct. Check if the password was recently changed without updating the device's "
+        "saved network credentials. Look for account lockout if failures are repeated.",
+    ),
+    (
+        r"unknown user|no such user|user.*not.*found|no.*user.*found|user.*unknown|no.*account",
+        "User account not found in directory",
+        "The username does not exist in the configured IdP/LDAP. "
+        "Verify the username format (UPN vs. sAMAccountName). "
+        "Check that the LDAP search base in Mist (Org > Access > Identity Providers) "
+        "covers the user's OU. Confirm the account has not been deleted.",
+    ),
+    (
+        r"account.*disabled|user.*disabled|account.*inactive|disabled.*account|user.*inactive",
+        "User account is disabled in the directory",
+        "The IdP reports this account as disabled. Re-enable it in Active Directory / "
+        "Entra ID, or re-enroll the device under an active account.",
+    ),
+    (
+        r"account.*locked|locked.*account|too many.*attempt|account.*blocked|intruder.*lockout",
+        "User account is locked out",
+        "Too many failed authentication attempts have locked the account. Unlock it in "
+        "Active Directory / Entra ID. Investigate why the device was generating repeated "
+        "failures — the saved Wi-Fi password profile is likely outdated.",
+    ),
+    (
+        r"password.*expir|expir.*password|must.*change.*password|password.*change.*required",
+        "User password has expired",
+        "The user must reset their password. Once reset, update saved Wi-Fi credentials on "
+        "the device. For domain-joined devices, ensure the device can reach a domain "
+        "controller to pick up the new credentials.",
+    ),
+    (
+        r"not.*member|group.*member|no.*group.*access|group.*not.*found|authorization.*failed|not.*authoriz",
+        "User authenticated but not authorized — missing group membership",
+        "The IdP confirmed the user's identity but they are not in a group that grants "
+        "network access. Verify the NAC policy rule in Mist — check which IdP attribute "
+        "(group / OU / role) is being matched. Add the user to the required group in "
+        "Active Directory / Entra ID.",
+    ),
+    # ── MAC / Policy errors ───────────────────────────────────────────────────
+    (
+        r"no policy.*rules.*matched|implicit deny|no.*rule.*matched|policy.*not.*matched|no matching.*rule",
+        "No NAC policy rule matched this device — hit implicit deny",
+        "The device reached the end of all NAC rules without a match. "
+        "1) Verify the correct SSID / port policy is applied. "
+        "2) Review Organization > Access > NAC Rules — a rule must match on MAC label, "
+        "certificate, or IdP attribute. "
+        "3) For MAC auth devices, confirm the MAC is in the correct label/list.",
+    ),
+    (
+        r"mac.*not.*found|mac.*not.*list|mac.*unknown|unknown.*mac|not.*mac.*auth|mac.*auth.*fail",
+        "MAC address not enrolled in any MAC Authentication list",
+        "This device's MAC is not in any MAC Auth client list in Mist. Add it under "
+        "Organization > Access > Client Lists, or create a NAC rule that authenticates "
+        "this device via certificate or IdP instead.",
+    ),
+    (
+        r"vlan.*not.*found|vlan.*fail|no.*vlan|vlan.*assign|vlan.*not.*exist",
+        "VLAN assignment failed — VLAN may not exist on the switch or AP",
+        "Authentication succeeded but the assigned VLAN could not be applied. Verify the "
+        "VLAN ID in the matching NAC rule exists on the switch / AP. Check VLAN definitions "
+        "in the network configuration.",
+    ),
+    (
+        r"rate.?limit|too many request|throttl",
+        "Authentication attempts are being rate-limited",
+        "The client is sending authentication requests faster than the server allows. "
+        "This usually means a device in a retry loop. Check the supplicant configuration "
+        "for aggressive retry timers. Resolve the underlying auth failure to stop the loop.",
+    ),
+]
+
+
+def diagnose_text(primary_text, has_server_cert_fail=False):
+    """
+    Match the primary deny reason text against DENY_DIAGNOSIS patterns.
+    Returns (reason, fix) strings, or (None, None) if no pattern matches.
+    NAC_SERVER_CERT_VALIDATION_FAILURE events indicate the client rejected
+    the server cert, regardless of any accompanying text.
+    """
+    if has_server_cert_fail:
+        return (
+            "Client rejected the RADIUS server certificate (server cert not trusted)",
+            "The device's supplicant failed to validate the Mist RADIUS server certificate. "
+            "Export the Mist org CA from Organization > Access > Certificates and deploy it "
+            "to devices as a Trusted Root via MDM. Without this, EAP-TLS cannot complete the "
+            "handshake even if the client certificate is valid.",
+        )
+    tl = (primary_text or "").lower()
+    if not tl:
+        return None, None
+    for pattern, reason, fix in DENY_DIAGNOSIS:
+        if re.search(pattern, tl):
+            return reason, fix
+    return None, None
+
 
 REGIONS = [
     ("Global          (api.mist.com)",       "https://api.mist.com"),
@@ -190,6 +376,8 @@ def aggregate_events(events, site_map, lookback_days=7):
         # last-known location fields (updated to most-recent deny event)
         "_last_ts": 0,
         "ap": "", "ap_mac": "", "port_id": "", "switch_mac": "",
+        # diagnosis flag
+        "_server_cert_fail": False,
     })
     permit_macs = set()
 
@@ -240,6 +428,9 @@ def aggregate_events(events, site_map, lookback_days=7):
             c["port_id"]    = event.get("port_id", "") or event.get("port", "") or ""
             c["switch_mac"] = event.get("switch_mac", "") or ""
 
+        if etype == "NAC_SERVER_CERT_VALIDATION_FAILURE":
+            c["_server_cert_fail"] = True
+
         cat = classify_event(event)
         priority = {"cert": 3, "cred": 2, "mac": 1}
         if c["category"] is None or priority.get(cat, 0) > priority.get(c["category"], 0):
@@ -266,6 +457,7 @@ def aggregate_events(events, site_map, lookback_days=7):
             status = "silent" if biz_hours >= SILENCE_BIZ_HOURS else "failing"
 
         cat = c["category"] or "mac"
+        diagnosis, specific_fix = diagnose_text(primary_text, c["_server_cert_fail"])
 
         result.append({
             "mac":          mac,
@@ -287,6 +479,8 @@ def aggregate_events(events, site_map, lookback_days=7):
             "activity":     activity,
             "primaryText":  primary_text,
             "allTexts":     [{"text": t, "count": n} for t, n in all_texts],
+            "diagnosis":    diagnosis or "",
+            "specificFix":  specific_fix or CATEGORY_REMEDIATION.get(cat, ""),
             "assetStatus":  "unknown",
             "assetName":    "",
             "assetOwner":   "",
@@ -1042,7 +1236,7 @@ function getFiltered() {
   if (fReason) list = list.filter(c => c.allTexts.some(t => t.text === fReason));
   if (fAsset)  list = list.filter(c => c.assetStatus === fAsset);
   if (search)  list = list.filter(c =>
-    [c.mac, c.username, c.site, c.ssid, c.primaryText, c.assetName, c.assetOwner, c.assetDept, c.ap, c.portId, c.switchMac].some(v => (v||'').toLowerCase().includes(search))
+    [c.mac, c.username, c.site, c.ssid, c.primaryText, c.diagnosis, c.assetName, c.assetOwner, c.assetDept, c.ap, c.portId, c.switchMac].some(v => (v||'').toLowerCase().includes(search))
   );
 
   const blastOrd = { high: 3, med: 2, low: 1 };
@@ -1085,10 +1279,19 @@ function renderTable() {
   const rows = list.map(c => {
     const label = (c.username && c.username !== c.mac)
       ? `${c.mac}<br><small style="color:var(--text-muted)">${c.username}</small>` : c.mac;
-    const short = (c.primaryText || '').length > 60 ? c.primaryText.slice(0,57) + '…' : c.primaryText;
-    const tip   = c.allTexts.map(t => `${t.text} (x${t.count})`).join('\n');
-    const extra = c.allTexts.length > 1 ? `<br><small style="color:var(--text-muted)">+${c.allTexts.length-1} more</small>` : '';
-    const reason = short ? `<span title="${tip.replace(/"/g,'&quot;')}" style="cursor:help">${short}</span>${extra}` : '—';
+    const rawTip  = c.allTexts.map(t => `${t.text} (x${t.count})`).join('\n');
+    const extra   = c.allTexts.length > 1 ? `<br><small style="color:var(--text-muted)">+${c.allTexts.length-1} more</small>` : '';
+    const rawShort = (c.primaryText || '').length > 55 ? c.primaryText.slice(0,52) + '…' : c.primaryText;
+    let reason;
+    if (c.diagnosis) {
+      const diagShort = c.diagnosis.length > 58 ? c.diagnosis.slice(0,55) + '…' : c.diagnosis;
+      const fixTip    = (c.specificFix || '').replace(/"/g,'&quot;');
+      reason = `<span title="${fixTip}" style="cursor:help;color:var(--text)">${diagShort}</span>` +
+               (rawShort ? `<br><small style="color:var(--text-muted);font-style:italic" title="${rawTip.replace(/"/g,'&quot;')}">${rawShort}</small>` : '') +
+               extra;
+    } else {
+      reason = rawShort ? `<span title="${rawTip.replace(/"/g,'&quot;')}" style="cursor:help">${rawShort}</span>${extra}` : '—';
+    }
     return `<tr>
       <td class="mac-cell">${label||'—'}</td>
       <td>${c.site||'—'}${c.ssid?`<br><small style="color:var(--text-muted)">${c.ssid}</small>`:''}${locationLine(c)}</td>
@@ -1189,7 +1392,9 @@ function selectSite(site) {
       body += `  • MAC: ${c.mac}`;
       if (c.username && c.username !== c.mac) body += `  User: ${c.username}`;
       body += `  — ${c.daysFailing} day${c.daysFailing>1?'s':''}, ${c.attempts} attempts (${c.status})\n`;
-      if (c.primaryText) body += `    Error: ${c.primaryText}\n`;
+      if (c.diagnosis)    body += `    Cause: ${c.diagnosis}\n`;
+      else if (c.primaryText) body += `    Error: ${c.primaryText}\n`;
+      if (c.specificFix)  body += `    Fix:   ${c.specificFix}\n`;
       const loc = [];
       if (c.ap || c.apMac)  loc.push(`AP: ${c.ap || c.apMac}`);
       if (c.portId)         loc.push(`Port: ${c.portId}`);
