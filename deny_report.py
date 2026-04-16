@@ -1046,7 +1046,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="card"><div class="card-label">Unique Clients</div><div class="card-value" id="s-clients">—</div><div class="card-sub">Deduplicated by MAC</div></div>
     <div class="card"><div class="card-label">Sites Affected</div><div class="card-value" id="s-sites">—</div><div class="card-sub" id="s-sites-names"></div></div>
     <div class="card"><div class="card-label">Cert Failures</div><div class="card-value cert-color" id="s-cert">—</div><div class="card-sub" id="s-cert-pct"></div></div>
-    <div class="card"><div class="card-label">Silent Failures <span id="silent-help" style="cursor:help;color:var(--text-muted)" title="">ⓘ</span></div><div class="card-value" style="color:var(--silent)" id="s-silent">—</div><div class="card-sub">No retry in 8+ business hours</div></div>
+    <div class="card"><div class="card-label">Need Follow-up <span id="silent-help" style="cursor:help;color:var(--text-muted)" title="">ⓘ</span></div><div class="card-value" style="color:var(--silent)" id="s-silent">—</div><div class="card-sub" id="s-silent-sub">Stopped retrying · unresolved</div></div>
     <div class="card" id="card-managed" style="display:none"><div class="card-label">Managed Assets Failing</div><div class="card-value" style="color:#dc2626" id="s-managed">—</div><div class="card-sub" id="s-managed-sub"></div></div>
   </div>
 
@@ -1229,9 +1229,14 @@ function showDashboard() {
   document.getElementById('s-sites-names').textContent = sites.slice(0,3).join(', ') + (sites.length > 3 ? '…' : '');
   document.getElementById('s-cert').textContent     = certC.length;
   document.getElementById('s-cert-pct').textContent = clients.length ? `${Math.round(certC.length/clients.length*100)}% of clients` : '';
+  const managedSilent = clients.filter(c => c.status === 'silent' && c.assetStatus === 'managed');
   document.getElementById('s-silent').textContent   = silent.length;
+  document.getElementById('s-silent-sub').textContent =
+    managedSilent.length > 0
+      ? `${managedSilent.length} managed asset${managedSilent.length!==1?'s':''} · needs follow-up`
+      : 'Stopped retrying · unresolved';
   document.getElementById('silent-help').title =
-    `Silent = no retry in ${SILENCE_BIZ_HOURS} business hours (Mon–Fri ${BIZ_START}:00–${BIZ_END}:00). Weekend hours excluded.`;
+    `"Need Follow-up" = failed but stopped retrying for 8+ business hours (Mon–Fri ${BIZ_START}:00–${BIZ_END}:00). User may have given up. Managed assets here should be contacted proactively.`;
 
   if (REPORT.hasAssets) {
     document.getElementById('card-managed').style.display = '';
@@ -1459,12 +1464,14 @@ function buildProblems() {
 
   // Compute stats per group
   let problems = Object.values(groups).map(g => {
-    const failing  = g.clients.filter(c => c.status === 'failing').length;
-    const silent   = g.clients.filter(c => c.status === 'silent').length;
-    const resolved = g.clients.filter(c => c.status === 'resolved').length;
-    const topSites = Object.entries(g.siteCounts).sort((a,b) => b[1]-a[1]).slice(0,5);
+    const failing       = g.clients.filter(c => c.status === 'failing').length;
+    const silent        = g.clients.filter(c => c.status === 'silent').length;
+    const resolved      = g.clients.filter(c => c.status === 'resolved').length;
+    const managedSilent = g.clients.filter(c => c.status === 'silent' && c.assetStatus === 'managed').length;
+    const noisySilent   = g.clients.filter(c => c.status === 'silent' && c.attempts < 5).length;
+    const topSites      = Object.entries(g.siteCounts).sort((a,b) => b[1]-a[1]).slice(0,5);
     const totalAttempts = g.clients.reduce((s, c) => s + c.attempts, 0);
-    return { ...g, failing, silent, resolved, topSites,
+    return { ...g, failing, silent, resolved, managedSilent, noisySilent, topSites,
              totalAttempts, siteCount: Object.keys(g.siteCounts).length,
              activeCount: failing + silent };
   });
@@ -1496,39 +1503,101 @@ function buildProblems() {
   `;
 }
 
+function bizDaysAgo(ts) {
+  if (!ts) return '—';
+  const msPerDay = 86400000;
+  let days = 0;
+  let cur = new Date(ts * 1000);
+  const now = new Date();
+  cur.setHours(0,0,0,0);
+  const end = new Date(); end.setHours(0,0,0,0);
+  while (cur < end) {
+    const dow = cur.getDay();
+    if (dow !== 0 && dow !== 6) days++;
+    cur.setTime(cur.getTime() + msPerDay);
+  }
+  if (days === 0) return 'today';
+  if (days === 1) return '1 biz day ago';
+  return `${days} biz days ago`;
+}
+
 function renderProblemCard(p, idx) {
-  const icon    = CAT_ICONS[p.category] || '⚠️';
-  const title   = p.diagnosis || p.rawText || 'Unknown error';
+  const icon  = CAT_ICONS[p.category] || '⚠️';
+  const title = p.diagnosis || p.rawText || 'Unknown error';
   const rawLine = p.diagnosis && p.rawText
     ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;font-style:italic">${p.rawText.length>90?p.rawText.slice(0,87)+'…':p.rawText}</div>` : '';
 
+  // Stat line — silent gets follow-up callout if managed assets are involved
   const statParts = [];
-  if (p.failing)  statParts.push(`<span class="problem-stat failing">⚡ ${p.failing} failing</span>`);
-  if (p.silent)   statParts.push(`<span class="problem-stat silent">🔕 ${p.silent} silent</span>`);
+  if (p.failing) statParts.push(`<span class="problem-stat failing">⚡ ${p.failing} failing</span>`);
+  if (p.silent) {
+    const followUp = p.managedSilent > 0
+      ? ` <span style="color:#fbbf24;font-size:10px">(${p.managedSilent} managed — follow up)</span>` : '';
+    statParts.push(`<span class="problem-stat silent">🔕 ${p.silent} went quiet${followUp}</span>`);
+  }
   if (p.resolved) statParts.push(`<span class="problem-stat resolved">✓ ${p.resolved} resolved</span>`);
   statParts.push(`<span class="problem-stat">${p.siteCount} site${p.siteCount!==1?'s':''}</span>`);
   statParts.push(`<span class="problem-stat">${p.totalAttempts.toLocaleString()} attempts</span>`);
 
   const siteLine = p.topSites.map(([s,n]) => `${s} (${n})`).join(' · ');
-
   const fixBlock = p.specificFix
     ? `<div class="problem-fix"><strong>Recommended Fix</strong>${p.specificFix}</div>` : '';
 
-  const clientRows = p.clients.map(c => {
+  // Sort: failing first, then silent (managed before unmanaged), then resolved
+  const sortedClients = [...p.clients].sort((a, b) => {
+    const order = { failing: 0, silent: 1, resolved: 2 };
+    const oa = order[a.status] ?? 1, ob = order[b.status] ?? 1;
+    if (oa !== ob) return oa - ob;
+    // Within silent: managed before unmanaged
+    if (a.status === 'silent') {
+      const ma = a.assetStatus === 'managed' ? 0 : 1;
+      const mb = b.assetStatus === 'managed' ? 0 : 1;
+      return ma - mb;
+    }
+    return b.attempts - a.attempts;
+  });
+
+  const assetHeader = REPORT.hasAssets ? '<th>Asset</th>' : '';
+
+  const clientRows = sortedClients.map(c => {
+    const isNoisySilent = c.status === 'silent' && c.attempts < 5;
+    const rowStyle = isNoisySilent ? ' style="opacity:0.45"' : '';
+    const rowTitle = isNoisySilent ? ' title="Low activity — only tried a few times, likely noise"' : '';
+
+    // Time display: failing → last seen date, silent → how long quiet, resolved → last seen
+    let timeCell;
+    if (c.status === 'silent') {
+      const days = bizDaysAgo(c.lastSeen);
+      timeCell = `<span style="color:var(--silent)">🔕 ${days}</span>`;
+    } else if (c.status === 'resolved') {
+      timeCell = `<span style="color:var(--resolved)">✓ ${fmtDate(c.lastSeen)}</span>`;
+    } else {
+      timeCell = fmtDate(c.lastSeen);
+    }
+
     const loc = [];
     if (c.ap || c.apMac) loc.push(`📍 ${c.ap || c.apMac}`);
     if (c.portId)        loc.push(`🔌 ${c.portId}`);
     const locStr = loc.length ? `<br><span style="color:var(--text-muted);font-size:10px">${loc.join(' · ')}</span>` : '';
-    return `<tr>
+
+    let assetCell = '';
+    if (REPORT.hasAssets) {
+      if (c.assetStatus === 'managed') {
+        const sub = [c.assetName, c.assetOwner].filter(Boolean).join(' · ');
+        assetCell = `<td><span class="badge badge-managed">managed</span>${sub?`<br><span style="font-size:10px;color:var(--text-muted)">${sub}</span>`:''}</td>`;
+      } else {
+        assetCell = `<td><span class="badge badge-${c.assetStatus}">${c.assetStatus}</span></td>`;
+      }
+    }
+
+    return `<tr${rowStyle}${rowTitle}>
       <td style="font-family:monospace;font-size:11px">${c.mac}${c.username && c.username!==c.mac ? `<br><span style="color:var(--text-muted)">${c.username}</span>` : ''}</td>
       <td>${c.site||'—'}${locStr}</td>
-      <td>${fmtDate(c.lastSeen)}</td>
+      <td style="white-space:nowrap">${timeCell}${isNoisySilent ? ' <span style="font-size:10px;color:var(--text-muted)">low activity</span>' : ''}</td>
       <td><span class="badge badge-${c.status}">${c.status}</span></td>
-      ${REPORT.hasAssets ? `<td>${c.assetStatus==='managed'?`<span class="badge badge-managed">managed</span><br><span style="font-size:10px;color:var(--text-muted)">${c.assetName||''}</span>`:`<span class="badge badge-${c.assetStatus}">${c.assetStatus}</span>`}</td>` : ''}
+      ${assetCell}
     </tr>`;
   }).join('');
-
-  const assetHeader = REPORT.hasAssets ? '<th>Asset</th>' : '';
 
   return `
   <div class="problem-card">
@@ -1553,7 +1622,7 @@ function renderProblemCard(p, idx) {
       <div class="problem-toggle" onclick="toggleClients(${idx})">▶ Show ${p.clients.length} affected client${p.clients.length!==1?'s':''}</div>
       <div class="problem-clients" id="pclients-${idx}">
         <table>
-          <thead><tr><th>MAC / User</th><th>Site / Location</th><th>Last Seen</th><th>Status</th>${assetHeader}</tr></thead>
+          <thead><tr><th>MAC / User</th><th>Site / Location</th><th>Last Contact</th><th>Status</th>${assetHeader}</tr></thead>
           <tbody>${clientRows}</tbody>
         </table>
       </div>
