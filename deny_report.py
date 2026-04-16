@@ -69,6 +69,72 @@ CATEGORY_REMEDIATION = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 DENY_DIAGNOSIS = [
+    # ── Mist-formatted error strings (actual UI messages) ────────────────────
+    (
+        r"tls client certificate check failed|client certificate.*failed.*server|certificate check failed by the server",
+        "Client certificate rejected by the RADIUS server",
+        "The device presented a certificate the RADIUS server could not validate. "
+        "Common causes: the client cert was issued by a CA not trusted by Mist, the cert "
+        "is expired, or the cert is missing the clientAuth Extended Key Usage. "
+        "Verify the issuing CA is imported under Organization > Access > Certificates and "
+        "that the device cert has a valid chain.",
+    ),
+    (
+        r"tls server certificate validation failed|client.*does not trust.*certificate|server certificate validation failed by the client",
+        "Client rejected the RADIUS server certificate (server cert not trusted)",
+        "The device's supplicant failed to validate the Mist RADIUS server certificate. "
+        "Export the Mist org CA from Organization > Access > Certificates and deploy it "
+        "to devices as a Trusted Root via MDM. Without this, EAP-TLS cannot complete the "
+        "handshake even if the client certificate is valid.",
+    ),
+    (
+        r"client does not trust the certificate of the mist authentication service",
+        "Client does not trust the Mist Authentication Service certificate",
+        "The device has not been configured to trust the Mist RADIUS server certificate. "
+        "Export the CA from Organization > Access > Certificates and deploy via MDM as a "
+        "Trusted Root. Jamf: Configuration Profiles > Certificate payload. "
+        "Intune: Trusted Certificate profile.",
+    ),
+    (
+        r"peer is misbehaving|cannot continue.*peer|tls.*alert.*certificate unknown|alert.*fatal.*certificate",
+        "TLS alert from client — device does not recognise the server certificate",
+        "The device sent a TLS fatal alert, typically meaning it does not trust the RADIUS "
+        "server certificate. Deploy the Mist org CA cert to devices as a Trusted Root via MDM.",
+    ),
+    (
+        r"tls client certificate.*expired|client certificate has expired",
+        "Client certificate has expired",
+        "The device certificate has passed its validity end date. Issue a new certificate "
+        "from your PKI and push via MDM. Review MDM certificate renewal policies to prevent recurrence.",
+    ),
+    (
+        r"no matching idps configured|no.*idp.*configured|idp.*not.*found",
+        "No Identity Provider configured in Mist for this authentication",
+        "The NAC rule matched but no IdP is associated with it, or no rule matched at all. "
+        "Check Organization > Access > NAC Rules and ensure the matching rule has an IdP "
+        "(LDAP/RADIUS proxy) configured. Verify the org has at least one active IdP.",
+    ),
+    (
+        r"no mutually acceptable types|unsupported authentication type|supported authentication types.*eap.tls",
+        "Device is using an EAP method not supported by Mist Access Assurance",
+        "Mist Access Assurance supports EAP-TLS only. The device is offering a different "
+        "EAP method (PEAP, TTLS, MD5, etc.). Update the wireless profile via MDM to use "
+        "EAP-TLS and ensure a device certificate is enrolled.",
+    ),
+    (
+        r"multiple.*@.*user.?name|rejected.*multiple.*@|invalid.*user.?name.*format",
+        "Malformed username — multiple '@' characters in User-Name attribute",
+        "The device is sending a username with an invalid format (e.g. user@@domain.com). "
+        "This is often caused by a misconfigured wireless profile or supplicant. "
+        "Check the EAP identity / outer identity setting on the device wireless profile.",
+    ),
+    (
+        r"tls handshake.*failed|handshake.*client.*failed|signature algorithms|cipher.*suite",
+        "TLS handshake failed — possible cipher suite or signature algorithm mismatch",
+        "The TLS handshake could not complete. Check that the device supports the cipher "
+        "suites and TLS version used by Mist. Older devices may need a supplicant update. "
+        "Also verify the client certificate uses a supported signature algorithm (RSA or ECDSA).",
+    ),
     # ── Unsupported EAP methods ───────────────────────────────────────────────
     (
         r"eap.?peap|peap",
@@ -379,13 +445,15 @@ def aggregate_events(events, site_map, lookback_days=7):
         # diagnosis flag
         "_server_cert_fail": False,
     })
-    permit_macs = set()
+    permit_macs = {}   # mac → latest permit timestamp
 
     for event in events:
         etype = event.get("type", "")
         ts    = float(event.get("timestamp", 0))
         if etype == "NAC_CLIENT_PERMIT":
-            permit_macs.add(event.get("mac", ""))
+            mac_p = event.get("mac", "")
+            if mac_p and ts > permit_macs.get(mac_p, 0):
+                permit_macs[mac_p] = ts
             continue
         if etype not in DENY_EVENT_TYPES:
             continue
@@ -451,7 +519,8 @@ def aggregate_events(events, site_map, lookback_days=7):
         activity     = {day: c["_day_counts"].get(day, 0) for day in day_labels}
         biz_hours    = business_hours_elapsed(c["lastSeen"] or now_ts, now_ts)
 
-        if mac in permit_macs:
+        permit_ts = permit_macs.get(mac, 0)
+        if permit_ts and permit_ts > (c["lastSeen"] or 0):
             status = "resolved"
         else:
             status = "silent" if biz_hours >= SILENCE_BIZ_HOURS else "failing"
@@ -876,6 +945,37 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .badge-managed    { background: rgba(34,197,94,0.15);   color: #16a34a; }
   .badge-unmanaged  { background: rgba(156,163,175,0.15); color: #6b7280; }
   .badge-unknown    { background: rgba(156,163,175,0.10); color: #9ca3af; }
+
+  /* Problem cards */
+  .problem-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 16px; overflow: hidden; }
+  .problem-card-header { padding: 18px 20px 14px; display: flex; align-items: flex-start; gap: 14px; cursor: pointer; user-select: none; }
+  .problem-card-header:hover { background: rgba(255,255,255,0.02); }
+  .problem-icon { font-size: 22px; flex-shrink: 0; margin-top: 2px; }
+  .problem-title { flex: 1; }
+  .problem-title h3 { font-size: 15px; font-weight: 600; margin-bottom: 6px; line-height: 1.3; }
+  .problem-stats { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; margin-top: 6px; }
+  .problem-stat { color: var(--text-muted); }
+  .problem-stat.failing { color: var(--high); font-weight: 600; }
+  .problem-stat.silent  { color: var(--silent); font-weight: 600; }
+  .problem-stat.resolved{ color: var(--resolved); }
+  .problem-impact { flex-shrink: 0; text-align: right; }
+  .problem-impact-num { font-size: 26px; font-weight: 700; line-height: 1; }
+  .problem-impact-lbl { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .problem-body { padding: 0 20px 16px; border-top: 1px solid var(--border); }
+  .problem-fix { background: rgba(79,142,247,0.07); border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0; padding: 10px 14px; margin: 14px 0 10px; font-size: 12px; line-height: 1.6; }
+  .problem-fix strong { color: var(--accent); display: block; margin-bottom: 3px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .problem-sites { font-size: 11px; color: var(--text-muted); margin-bottom: 12px; }
+  .problem-toggle { font-size: 12px; color: var(--accent); cursor: pointer; border: 1px solid rgba(79,142,247,0.3); border-radius: 5px; padding: 5px 12px; display: inline-block; }
+  .problem-toggle:hover { background: rgba(79,142,247,0.08); }
+  .problem-clients { margin-top: 12px; display: none; }
+  .problem-clients.open { display: block; }
+  .problem-clients table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .problem-clients th { background: var(--surface2); color: var(--text-muted); font-weight: 600; padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+  .problem-clients td { padding: 7px 8px; border-bottom: 1px solid rgba(46,51,80,0.4); vertical-align: top; }
+  .problem-clients tr:last-child td { border-bottom: none; }
+  .p-filter-bar { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
+  .p-filter-bar select { background: var(--surface2); border: 1px solid var(--border); border-radius: 5px; padding: 5px 10px; color: var(--text); font-size: 12px; }
+  .p-filter-bar label { font-size: 12px; color: var(--text-muted); }
   .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
   .tab { padding: 8px 16px; cursor: pointer; border-radius: 6px 6px 0 0; font-size: 13px; color: var(--text-muted); border: 1px solid transparent; border-bottom: none; }
   .tab.active { background: var(--surface); border-color: var(--border); color: var(--text); margin-bottom: -1px; }
@@ -959,17 +1059,23 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   <div id="alerts"></div>
 
   <div class="tabs">
-    <div class="tab active"  onclick="switchTab('dashboard')">Dashboard</div>
+    <div class="tab active"  onclick="switchTab('problems')">Problems</div>
+    <div class="tab"         onclick="switchTab('dashboard')">All Clients</div>
     <div class="tab"         onclick="switchTab('reasons')">Deny Reasons</div>
     <div class="tab"         onclick="switchTab('timeline')">7-Day Timeline</div>
     <div class="tab"         onclick="switchTab('notifications')">Notification Center</div>
     <div class="tab"         onclick="switchTab('help')">? Help</div>
   </div>
 
-  <!-- Dashboard tab -->
-  <div class="tab-content active" id="tab-dashboard">
+  <!-- Problems tab (default) -->
+  <div class="tab-content active" id="tab-problems">
+    <div id="problems-list"></div>
+  </div>
+
+  <!-- All Clients tab (was Dashboard) -->
+  <div class="tab-content" id="tab-dashboard">
     <div class="section">
-      <div class="section-title">Client Deny Summary</div>
+      <div class="section-title">All Clients</div>
       <div class="filter-bar">
         <input type="text" id="search" placeholder="Search MAC, username, site, reason..." oninput="renderTable()">
         <select id="f-cat"    onchange="renderTable()"><option value="">All Categories</option><option value="cert">Cert / TLS</option><option value="cred">Credentials</option><option value="mac">MAC / Policy</option></select>
@@ -1156,12 +1262,13 @@ function showDashboard() {
   document.getElementById('timeline-title').textContent = `${lookbackDays}-Day Persistence Timeline`;
 
   renderAlerts();
+  buildProblems();
   renderTable();
   renderDenyReasons();
   renderTimeline();
   renderNotifications();
   renderNocDigest();
-  switchTab('dashboard');
+  switchTab('problems');
 }
 
 // ── Alerts ───────────────────────────────────────────────────────────────────
@@ -1322,6 +1429,148 @@ function renderTable() {
   }).join('');
   document.getElementById('tbody').innerHTML = rows ||
     `<tr><td colspan="${REPORT.hasAssets ? 11 : 10}" style="text-align:center;color:var(--text-muted);padding:32px">No clients match the current filters.</td></tr>`;
+}
+
+// ── Problems view ────────────────────────────────────────────────────────────
+const CAT_ICONS = { cert: '🔐', cred: '🔑', mac: '📱' };
+
+function buildProblems() {
+  const clients = REPORT.clients;
+
+  // Group by diagnosis (if matched) else by raw primaryText
+  const groups = {};
+  for (const c of clients) {
+    const key = c.diagnosis || c.primaryText || 'Unknown error';
+    if (!groups[key]) {
+      groups[key] = {
+        key,
+        diagnosis:   c.diagnosis || '',
+        rawText:     c.primaryText || '',
+        specificFix: c.specificFix || '',
+        category:    c.category,
+        categoryLabel: c.categoryLabel,
+        clients: [],
+        siteCounts: {},
+      };
+    }
+    groups[key].clients.push(c);
+    if (c.site) groups[key].siteCounts[c.site] = (groups[key].siteCounts[c.site] || 0) + 1;
+  }
+
+  // Compute stats per group
+  let problems = Object.values(groups).map(g => {
+    const failing  = g.clients.filter(c => c.status === 'failing').length;
+    const silent   = g.clients.filter(c => c.status === 'silent').length;
+    const resolved = g.clients.filter(c => c.status === 'resolved').length;
+    const topSites = Object.entries(g.siteCounts).sort((a,b) => b[1]-a[1]).slice(0,5);
+    const totalAttempts = g.clients.reduce((s, c) => s + c.attempts, 0);
+    return { ...g, failing, silent, resolved, topSites,
+             totalAttempts, siteCount: Object.keys(g.siteCounts).length,
+             activeCount: failing + silent };
+  });
+
+  // Sort: active problems (failing+silent) first, then by client count
+  problems.sort((a, b) => b.activeCount - a.activeCount || b.clients.length - a.clients.length);
+
+  // Apply status filter from dropdown
+  const fStatus = document.getElementById('p-status').value;
+  if (fStatus === 'active')   problems = problems.filter(p => p.activeCount > 0);
+  if (fStatus === 'resolved') problems = problems.filter(p => p.resolved > 0);
+
+  const container = document.getElementById('problems-list');
+  if (!problems.length) {
+    container.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">No problems found.</div>';
+    return;
+  }
+  container.innerHTML = `
+    <div class="p-filter-bar" style="padding:16px 0 0">
+      <label>Show:</label>
+      <select id="p-status" onchange="buildProblems()">
+        <option value="all" ${fStatus==='all'?'selected':''}>All problems</option>
+        <option value="active" ${fStatus==='active'?'selected':''}>Active only (failing + silent)</option>
+        <option value="resolved" ${fStatus==='resolved'?'selected':''}>Resolved</option>
+      </select>
+      <span style="color:var(--text-muted);font-size:12px">${problems.length} problem${problems.length!==1?'s':''} · ${problems.reduce((s,p)=>s+p.clients.length,0)} clients</span>
+    </div>
+    ${problems.map((p, idx) => renderProblemCard(p, idx)).join('')}
+  `;
+}
+
+function renderProblemCard(p, idx) {
+  const icon    = CAT_ICONS[p.category] || '⚠️';
+  const title   = p.diagnosis || p.rawText || 'Unknown error';
+  const rawLine = p.diagnosis && p.rawText
+    ? `<div style="font-size:11px;color:var(--text-muted);margin-top:4px;font-style:italic">${p.rawText.length>90?p.rawText.slice(0,87)+'…':p.rawText}</div>` : '';
+
+  const statParts = [];
+  if (p.failing)  statParts.push(`<span class="problem-stat failing">⚡ ${p.failing} failing</span>`);
+  if (p.silent)   statParts.push(`<span class="problem-stat silent">🔕 ${p.silent} silent</span>`);
+  if (p.resolved) statParts.push(`<span class="problem-stat resolved">✓ ${p.resolved} resolved</span>`);
+  statParts.push(`<span class="problem-stat">${p.siteCount} site${p.siteCount!==1?'s':''}</span>`);
+  statParts.push(`<span class="problem-stat">${p.totalAttempts.toLocaleString()} attempts</span>`);
+
+  const siteLine = p.topSites.map(([s,n]) => `${s} (${n})`).join(' · ');
+
+  const fixBlock = p.specificFix
+    ? `<div class="problem-fix"><strong>Recommended Fix</strong>${p.specificFix}</div>` : '';
+
+  const clientRows = p.clients.map(c => {
+    const loc = [];
+    if (c.ap || c.apMac) loc.push(`📍 ${c.ap || c.apMac}`);
+    if (c.portId)        loc.push(`🔌 ${c.portId}`);
+    const locStr = loc.length ? `<br><span style="color:var(--text-muted);font-size:10px">${loc.join(' · ')}</span>` : '';
+    return `<tr>
+      <td style="font-family:monospace;font-size:11px">${c.mac}${c.username && c.username!==c.mac ? `<br><span style="color:var(--text-muted)">${c.username}</span>` : ''}</td>
+      <td>${c.site||'—'}${locStr}</td>
+      <td>${fmtDate(c.lastSeen)}</td>
+      <td><span class="badge badge-${c.status}">${c.status}</span></td>
+      ${REPORT.hasAssets ? `<td>${c.assetStatus==='managed'?`<span class="badge badge-managed">managed</span><br><span style="font-size:10px;color:var(--text-muted)">${c.assetName||''}</span>`:`<span class="badge badge-${c.assetStatus}">${c.assetStatus}</span>`}</td>` : ''}
+    </tr>`;
+  }).join('');
+
+  const assetHeader = REPORT.hasAssets ? '<th>Asset</th>' : '';
+
+  return `
+  <div class="problem-card">
+    <div class="problem-card-header" onclick="toggleProblem(${idx})">
+      <div class="problem-icon">${icon}</div>
+      <div class="problem-title">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+          <span class="badge badge-${p.category}">${p.categoryLabel}</span>
+        </div>
+        <h3>${title}</h3>
+        ${rawLine}
+        <div class="problem-stats">${statParts.join('')}</div>
+      </div>
+      <div class="problem-impact">
+        <div class="problem-impact-num" style="color:${p.activeCount>0?'var(--high)':'var(--resolved)'}">${p.clients.length}</div>
+        <div class="problem-impact-lbl">clients</div>
+      </div>
+    </div>
+    <div class="problem-body" id="pbody-${idx}" style="display:none">
+      ${fixBlock}
+      <div class="problem-sites">📍 Sites: ${siteLine || '—'}</div>
+      <div class="problem-toggle" onclick="toggleClients(${idx})">▶ Show ${p.clients.length} affected client${p.clients.length!==1?'s':''}</div>
+      <div class="problem-clients" id="pclients-${idx}">
+        <table>
+          <thead><tr><th>MAC / User</th><th>Site / Location</th><th>Last Seen</th><th>Status</th>${assetHeader}</tr></thead>
+          <tbody>${clientRows}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>`;
+}
+
+function toggleProblem(idx) {
+  const body = document.getElementById(`pbody-${idx}`);
+  body.style.display = body.style.display === 'none' ? '' : 'none';
+}
+
+function toggleClients(idx) {
+  const el  = document.getElementById(`pclients-${idx}`);
+  const btn = el.previousElementSibling;
+  const open = el.classList.toggle('open');
+  btn.textContent = (open ? '▼ Hide' : '▶ Show') + btn.textContent.replace(/^[▼▶] (Hide|Show)/, '');
 }
 
 // ── Deny reasons ─────────────────────────────────────────────────────────────
