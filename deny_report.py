@@ -668,6 +668,14 @@ def build_excel(report, path):
             return ""
         return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
 
+    # openpyxl rejects control characters (null bytes, tabs embedded in field
+    # values, etc.) that the Mist API occasionally returns in username/text fields.
+    _illegal = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
+    def safe_str(v):
+        if not isinstance(v, str):
+            return v
+        return _illegal.sub('', v)
+
     # ── Sheet 1: Client Summary ──────────────────────────────────────────────
     ws = wb.active
     ws.title = "Client Summary"
@@ -682,23 +690,23 @@ def build_excel(report, path):
     style_header_row(ws, cols)
 
     for r, c in enumerate(report["clients"], 2):
-        ws.cell(r, 1,  c["mac"]).font         = Font(name="Courier New", size=10)
-        ws.cell(r, 2,  c.get("username", ""))
-        ws.cell(r, 3,  c.get("site", ""))
-        ws.cell(r, 4,  c.get("ssid", ""))
-        ws.cell(r, 5,  c.get("auth_type", ""))
-        cat_cell = ws.cell(r, 6,  c["categoryLabel"])
+        ws.cell(r, 1,  safe_str(c["mac"])).font = Font(name="Courier New", size=10)
+        ws.cell(r, 2,  safe_str(c.get("username", "")))
+        ws.cell(r, 3,  safe_str(c.get("site", "")))
+        ws.cell(r, 4,  safe_str(c.get("ssid", "")))
+        ws.cell(r, 5,  safe_str(c.get("auth_type", "")))
+        cat_cell = ws.cell(r, 6,  safe_str(c["categoryLabel"]))
         color_cell(cat_cell, CAT_COLORS.get(c["category"], "888888"), "FFFFFF")
-        sts_cell = ws.cell(r, 7,  c["status"])
+        sts_cell = ws.cell(r, 7,  safe_str(c["status"]))
         color_cell(sts_cell, STS_COLORS.get(c["status"], "888888"), "FFFFFF")
-        blt_cell = ws.cell(r, 8,  c["blastScore"].upper())
+        blt_cell = ws.cell(r, 8,  safe_str(c["blastScore"].upper()))
         color_cell(blt_cell, BLT_COLORS.get(c["blastScore"], "888888"), "FFFFFF")
         ws.cell(r, 9,  c["blastCount"])
         ws.cell(r, 10, c["attempts"])
         ws.cell(r, 11, c["daysFailing"])
         ws.cell(r, 12, fmt_ts(c["firstSeen"]))
         ws.cell(r, 13, fmt_ts(c["lastSeen"]))
-        reason_cell = ws.cell(r, 14, c.get("primaryText", ""))
+        reason_cell = ws.cell(r, 14, safe_str(c.get("primaryText", "")))
         reason_cell.alignment = WRAP
         ws.row_dimensions[r].height = 40
 
@@ -712,14 +720,14 @@ def build_excel(report, path):
     ]
     style_header_row(ws2, cols2)
     for r, dr in enumerate(report["denyReasons"], 2):
-        ws2.cell(r, 1, dr["text"]).alignment = WRAP
+        ws2.cell(r, 1, safe_str(dr["text"])).alignment = WRAP
         ws2.cell(r, 2, dr["clientCount"])
         ws2.cell(r, 3, dr["totalEvents"])
         cats = list({c["category"] for c in dr["clients"]})
         cat  = cats[0] if len(cats) == 1 else "mixed"
         cat_cell2 = ws2.cell(r, 4, CATEGORY_LABELS.get(cat, cat))
         color_cell(cat_cell2, CAT_COLORS.get(cat, "888888"), "FFFFFF")
-        macs = ", ".join(c.get("username") or c["mac"] for c in dr["clients"])
+        macs = ", ".join(safe_str(c.get("username") or c["mac"]) for c in dr["clients"])
         ws2.cell(r, 5, macs).alignment = WRAP
         ws2.row_dimensions[r].height   = 40
     ws2.auto_filter.ref = f"A1:{get_column_letter(len(cols2))}1"
@@ -730,9 +738,9 @@ def build_excel(report, path):
     hdr_cols   = [("MAC / User", 22), ("Site", 18)] + [(d, 11) for d in day_labels] + [("Total", 9)]
     style_header_row(ws3, hdr_cols)
     for r, c in enumerate(report["clients"], 2):
-        lbl = c.get("username") or c["mac"]
+        lbl = safe_str(c.get("username") or c["mac"])
         ws3.cell(r, 1, lbl).font = Font(name="Courier New", size=10)
-        ws3.cell(r, 2, c.get("site", ""))
+        ws3.cell(r, 2, safe_str(c.get("site", "")))
         total = 0
         for col_i, day in enumerate(day_labels, 3):
             n = c.get("activity", {}).get(day, 0)
