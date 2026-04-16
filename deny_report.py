@@ -1479,8 +1479,8 @@ function buildProblems() {
   // Sort: active problems (failing+silent) first, then by client count
   problems.sort((a, b) => b.activeCount - a.activeCount || b.clients.length - a.clients.length);
 
-  // Apply status filter from dropdown
-  const fStatus = document.getElementById('p-status').value;
+  // Apply status filter from dropdown (element may not exist on first render)
+  const fStatus = (document.getElementById('p-status') || {value:'all'}).value;
   if (fStatus === 'active')   problems = problems.filter(p => p.activeCount > 0);
   if (fStatus === 'resolved') problems = problems.filter(p => p.resolved > 0);
 
