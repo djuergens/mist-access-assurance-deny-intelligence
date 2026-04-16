@@ -428,8 +428,9 @@ def load_asset_csv(path):
 # Aggregation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def aggregate_events(events, site_map, lookback_days=7):
+def aggregate_events(events, site_map, lookback_days=7, device_map=None):
     """Collapse raw events to one record per client MAC."""
+    device_map = device_map or {}
     now_ts          = datetime.now(tz=timezone.utc).timestamp()
     window_start_ts = now_ts - (lookback_days * 86400)
 
@@ -488,13 +489,21 @@ def aggregate_events(events, site_map, lookback_days=7):
         if c["lastSeen"]  is None or ts > c["lastSeen"]:
             c["lastSeen"]  = ts
 
-        # Keep last-known location from the most-recent deny event
+        # Keep last-known location from the most-recent deny event.
+        # The Mist NAC event 'ap' field contains the AP MAC address, not its name.
+        # Resolve to hostname via device_map when available.
         if ts > c["_last_ts"]:
             c["_last_ts"]   = ts
-            c["ap"]         = event.get("ap", "") or event.get("ap_name", "") or ""
-            c["ap_mac"]     = event.get("ap_mac", "") or ""
+            raw_ap          = event.get("ap", "") or event.get("ap_name", "") or ""
+            raw_ap_mac      = event.get("ap_mac", "") or raw_ap or ""
+            norm_ap_mac     = re.sub(r'[:\-.]', '', raw_ap_mac).lower()
+            c["ap"]         = device_map.get(norm_ap_mac, "") or raw_ap
+            c["ap_mac"]     = raw_ap_mac
             c["port_id"]    = event.get("port_id", "") or event.get("port", "") or ""
-            c["switch_mac"] = event.get("switch_mac", "") or ""
+            raw_sw_mac      = event.get("switch_mac", "") or ""
+            norm_sw_mac     = re.sub(r'[:\-.]', '', raw_sw_mac).lower()
+            c["switch_mac"] = raw_sw_mac
+            c["switch_name"]= device_map.get(norm_sw_mac, "")
 
         if etype == "NAC_SERVER_CERT_VALIDATION_FAILURE":
             c["_server_cert_fail"] = True
@@ -558,6 +567,7 @@ def aggregate_events(events, site_map, lookback_days=7):
             "apMac":        c["ap_mac"],
             "portId":       c["port_id"],
             "switchMac":    c["switch_mac"],
+            "switchName":   c.get("switch_name", ""),
         })
 
     # Blast radius — how many clients share the same primary deny reason?
@@ -645,6 +655,30 @@ def fetch_sites(token, org_id, base_url):
     resp.raise_for_status()
     sites = resp.json()
     return {s["id"]: s["name"] for s in sites}
+
+
+def fetch_device_map(token, org_id, base_url):
+    """
+    Return dict of {normalized_mac: hostname} for all APs and switches in the org.
+    Used to resolve AP/switch MAC addresses to human-readable names in the report.
+    """
+    url    = f"{base_url}/api/v1/orgs/{org_id}/inventory"
+    params = {"limit": 1000}
+    device_map = {}
+    while True:
+        resp = requests.get(url, headers=_headers(token), params=params, timeout=30)
+        resp.raise_for_status()
+        devices = resp.json()
+        for d in devices:
+            mac  = re.sub(r'[:\-.]', '', (d.get("mac") or "")).lower()
+            name = d.get("name") or d.get("hostname") or ""
+            if mac and name:
+                device_map[mac] = name
+        # Inventory endpoint uses offset pagination (no next cursor)
+        if len(devices) < params["limit"]:
+            break
+        params["page"] = params.get("page", 1) + 1
+    return device_map
 
 
 def fetch_events(token, org_id, lookback_days, base_url):
@@ -1319,10 +1353,14 @@ function renderAlerts() {
 // ── Last-known location helper ────────────────────────────────────────────────
 function locationLine(c) {
   const parts = [];
-  if (c.ap)       parts.push(`AP: ${c.ap}`);
+  if (c.ap)         parts.push(`AP: ${c.ap}`);
   else if (c.apMac) parts.push(`AP: ${c.apMac}`);
-  if (c.portId)   parts.push(`Port: ${c.portId}`);
-  if (c.switchMac && !c.portId) parts.push(`SW: ${c.switchMac}`);
+  if (c.portId) {
+    const swLabel = c.switchName || c.switchMac || '';
+    parts.push(swLabel ? `Port: ${c.portId} (${swLabel})` : `Port: ${c.portId}`);
+  } else if (c.switchName || c.switchMac) {
+    parts.push(`SW: ${c.switchName || c.switchMac}`);
+  }
   if (!parts.length) return '';
   return `<br><small style="color:var(--text-muted);font-size:10px" title="Last known location at time of deny">📍 ${parts.join(' · ')}</small>`;
 }
@@ -1577,7 +1615,12 @@ function renderProblemCard(p, idx) {
 
     const loc = [];
     if (c.ap || c.apMac) loc.push(`📍 ${c.ap || c.apMac}`);
-    if (c.portId)        loc.push(`🔌 ${c.portId}`);
+    if (c.portId) {
+      const swLabel = c.switchName || c.switchMac || '';
+      loc.push(`🔌 ${c.portId}${swLabel ? ' (' + swLabel + ')' : ''}`);
+    } else if (c.switchName || c.switchMac) {
+      loc.push(`🖧 ${c.switchName || c.switchMac}`);
+    }
     const locStr = loc.length ? `<br><span style="color:var(--text-muted);font-size:10px">${loc.join(' · ')}</span>` : '';
 
     let assetCell = '';
@@ -1726,9 +1769,13 @@ function selectSite(site) {
       if (c.specificFix)  body += `    Fix:   ${c.specificFix}\n`;
       const loc = [];
       if (c.ap || c.apMac)  loc.push(`AP: ${c.ap || c.apMac}`);
-      if (c.portId)         loc.push(`Port: ${c.portId}`);
-      if (c.switchMac && !c.portId) loc.push(`Switch: ${c.switchMac}`);
-      if (loc.length)       body += `    Last seen: ${loc.join(' · ')}\n`;
+      if (c.portId) {
+        const swLabel = c.switchName || c.switchMac || '';
+        loc.push(`Port: ${c.portId}${swLabel ? ' (' + swLabel + ')' : ''}`);
+      } else if (c.switchName || c.switchMac) {
+        loc.push(`Switch: ${c.switchName || c.switchMac}`);
+      }
+      if (loc.length) body += `    Last seen: ${loc.join(' · ')}\n`;
     });
     body += `\nRemediation: ${CATEGORY_REMEDIATION[cat]}\n\n`;
   });
@@ -2036,13 +2083,22 @@ def main():
     site_map = fetch_sites(token, org_id, base_url)
     print(f"  ✓  {len(site_map)} sites found")
 
+    # ── Fetch device inventory (AP/switch names) ──────────────────────────────
+    print("Fetching device inventory (AP/switch names)...")
+    try:
+        device_map = fetch_device_map(token, org_id, base_url)
+        print(f"  ✓  {len(device_map)} devices indexed")
+    except Exception as e:
+        print(f"  ⚠  Could not fetch device inventory ({e}) — MAC addresses will be shown instead of names")
+        device_map = {}
+
     # ── Fetch events ──────────────────────────────────────────────────────────
     print(f"Fetching deny events ({lookback_days}-day window)...")
     events = fetch_events(token, org_id, lookback_days, base_url)
 
     # ── Aggregate ─────────────────────────────────────────────────────────────
     print("Aggregating client records...")
-    clients, day_labels, deny_reasons = aggregate_events(events, site_map, lookback_days)
+    clients, day_labels, deny_reasons = aggregate_events(events, site_map, lookback_days, device_map)
 
     deny_event_count = sum(1 for e in events if e.get("type") in DENY_EVENT_TYPES)
 
